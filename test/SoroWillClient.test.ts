@@ -5,7 +5,7 @@ const { freighterApiMock, mockState } = vi.hoisted(() => ({
   freighterApiMock: {
     getAddress: vi.fn(async () => ({ address: 'GTESTACCOUNT', error: undefined })),
     requestAccess: vi.fn(),
-    getNetworkDetails: vi.fn(),
+    getNetworkDetails: vi.fn().mockResolvedValue({ network: 'TESTNET', networkPassphrase: 'TESTNET' }),
     isConnected: vi.fn(),
     signTransaction: vi.fn(),
   },
