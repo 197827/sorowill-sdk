@@ -47,6 +47,7 @@ import {
   InvalidCursorError,
   InvalidPaginationOptionsError,
   InvokeFailedError,
+  RequestTimeoutError,
   mapContractError,
   SimulationError,
   SoroWillError,
@@ -131,7 +132,7 @@ export interface SoroWillRpcServer {
     hash: string,
     options: { attempts: number },
   ): Promise<rpc.Api.GetTransactionResponse>;
-  getFeeStats?(): Promise<unknown>;
+  getFeeStats?(): Promise<rpc.Api.GetFeeStatsResponse>;
 }
 
 interface ContractSpecLike {
@@ -611,6 +612,9 @@ export class SoroWillClient {
     this.eventRpcUrl = options.eventRpcUrl ?? rpcUrl;
     this.eventStreamUrl = options.eventStreamUrl;
     this.defaultPollIntervalMs = options.defaultPollIntervalMs ?? 5_000;
+    if (!Number.isFinite(this.defaultPollIntervalMs) || this.defaultPollIntervalMs <= 0) {
+      throw new RangeError('defaultPollIntervalMs must be a finite number greater than zero');
+    }
     this.webSocketFactory = options.webSocketFactory;
     this.fetchImpl = options.fetch ?? fetch;
 
@@ -630,10 +634,26 @@ export class SoroWillClient {
     this.inFlightTracker = new InFlightTracker();
     this.readCache = options.readCache === false ? undefined : new ReadCache(options.readCache);
     this.retryOptions = { ...DEFAULT_RETRY_OPTIONS, ...options.retry };
+    const { maxAttempts, initialDelayMs, maxDelayMs, backoffFactor } = this.retryOptions;
+    if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+      throw new RangeError('retry.maxAttempts must be a positive integer');
+    }
+    if (!Number.isFinite(initialDelayMs) || initialDelayMs < 0) {
+      throw new RangeError('retry.initialDelayMs must be a finite, non-negative number');
+    }
+    if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+      throw new RangeError('retry.maxDelayMs must be a finite, non-negative number');
+    }
+    if (!Number.isFinite(backoffFactor) || backoffFactor < 1) {
+      throw new RangeError('retry.backoffFactor must be a finite number of at least 1');
+    }
     this.debug = options.debug ?? false;
     this.debugLogger = new DebugLogger(this.debug);
     this.autoFeeBumpOnTimeout = options.autoFeeBumpOnTimeout ?? false;
     this.transactionTimeoutSeconds = options.transactionTimeoutSeconds ?? 30;
+    if (!Number.isFinite(this.transactionTimeoutSeconds) || this.transactionTimeoutSeconds <= 0) {
+      throw new RangeError('transactionTimeoutSeconds must be a finite number greater than zero');
+    }
 
     if (this.readCache && options.eventSource) {
       this.eventSubscription = options.eventSource.subscribe((event) => {
@@ -1754,7 +1774,10 @@ export class SoroWillClient {
       options?.signal?.throwIfAborted();
       let account: Account;
       try {
-        account = await this.rpc(() => this.server.getAccount(publicKey), options);
+        account = await this.rpc(
+          () => this.rpcPool.withFailover((server) => server.getAccount(publicKey)),
+          options,
+        );
       } catch (getAccountError) {
         // Surface a clear, actionable error when the account is not funded or
         // does not exist on the network, rather than leaking the raw RPC error.
@@ -1769,7 +1792,10 @@ export class SoroWillClient {
 
       // prepareTransaction simulates and assembles Soroban data for the whole transaction.
       options?.signal?.throwIfAborted();
-      const prepared = await this.rpc(() => this.server.prepareTransaction(builtTx), options);
+      const prepared = await this.rpc(
+        () => this.rpcPool.withFailover((server) => server.prepareTransaction(builtTx)),
+        options,
+      );
       this.debugLogger.logSimulation(label, undefined, prepared.fee);
 
       const signedTxXdr = await this.wallet.signTransaction(prepared.toXDR(), {
@@ -1786,7 +1812,13 @@ export class SoroWillClient {
       }
 
       options?.signal?.throwIfAborted();
-      const sendResponse = await this.rpc(() => this.server.sendTransaction(signedTx), options);
+      // Failover only retries connection-level errors (see RpcEndpointPool). Re-sending the
+      // same signed envelope is safe: it has the same hash and sequence number, so the
+      // network applies it at most once and never double-executes the invocation.
+      const sendResponse = await this.rpc(
+        () => this.rpcPool.withFailover((server) => server.sendTransaction(signedTx)),
+        options,
+      );
       this.debugLogger.logSubmission(label, undefined, sendResponse.hash);
 
       // Handle distinct sendTransaction statuses per the Soroban RPC spec.
@@ -1849,7 +1881,7 @@ export class SoroWillClient {
           }
 
           const feeBumpResponse = await this.rpc(
-            () => this.server.sendTransaction(feeBumpSignedTx),
+            () => this.rpcPool.withFailover((server) => server.sendTransaction(feeBumpSignedTx)),
             options,
           );
 
@@ -1953,8 +1985,15 @@ export class SoroWillClient {
       );
     }
     const publicKey = await this.getWalletPublicKey();
-    await this.rpc(() => this.server.getAccount(publicKey), options);
-    const sendResponse = await this.rpc(() => this.server.sendTransaction(signedTx), options);
+    await this.rpc(
+      () => this.rpcPool.withFailover((server) => server.getAccount(publicKey)),
+      options,
+    );
+    // Safe to fail over: the identical signed envelope can only be applied once.
+    const sendResponse = await this.rpc(
+      () => this.rpcPool.withFailover((server) => server.sendTransaction(signedTx)),
+      options,
+    );
 
     if (sendResponse.status === 'ERROR') {
       const errorXdr = sendResponse.errorResult?.toXDR?.('base64') ?? 'no error result';
@@ -1968,7 +2007,10 @@ export class SoroWillClient {
     }
 
     const txResponse = await this.rpc(
-      () => this.server.pollTransaction(sendResponse.hash, { attempts: this.pollAttempts }),
+      () =>
+        this.rpcPool.withFailover((server) =>
+          server.pollTransaction(sendResponse.hash, { attempts: this.pollAttempts }),
+        ),
       options,
     );
 
@@ -1988,12 +2030,17 @@ export class SoroWillClient {
     return this.getSpec(options);
   }
 
-  async getNetworkFeeStats(options?: RequestOptions): Promise<unknown> {
-    const feeStats = this.server.getFeeStats;
-    if (!feeStats) {
-      return {};
+  /**
+   * Returns network-wide inclusion-fee statistics (`rpc.Api.GetFeeStatsResponse`).
+   *
+   * @throws {SoroWillError} If the configured RPC server does not support `getFeeStats`.
+   */
+  async getNetworkFeeStats(options?: RequestOptions): Promise<rpc.Api.GetFeeStatsResponse> {
+    const server = this.server;
+    if (typeof server.getFeeStats !== 'function') {
+      throw new SoroWillError('The configured RPC server does not support getFeeStats');
     }
-    return this.rpc(() => feeStats(), options);
+    return this.rpc(() => server.getFeeStats!(), options);
   }
 
   async assertWalletNetwork(network: { networkPassphrase: string }): Promise<void> {
@@ -2031,6 +2078,10 @@ export class SoroWillClient {
    * exponential backoff, for transient read-path failures. Defaults to a
    * single attempt (no retry) unless the caller opts in via
    * `SoroWillClientOptions.retry`.
+   *
+   * Typed errors ({@link RequestTimeoutError}, `AbortError`) and failures of a
+   * single-attempt call propagate unchanged; only a failure that exhausted
+   * more than one attempt is wrapped in a `SoroWillError` (original in `cause`).
    */
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
     const { maxAttempts, initialDelayMs, maxDelayMs, backoffFactor } = this.retryOptions;
@@ -2040,6 +2091,13 @@ export class SoroWillClient {
       try {
         return await operation();
       } catch (error) {
+        if (
+          error instanceof RequestTimeoutError ||
+          (error instanceof Error && error.name === 'AbortError') ||
+          maxAttempts === 1
+        ) {
+          throw error;
+        }
         lastError = error;
         if (attempt === maxAttempts) {
           break;
