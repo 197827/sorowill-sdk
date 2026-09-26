@@ -114,6 +114,7 @@ export {
   InvalidPercentagesError,
   InvalidPeriodError,
   InvalidPreimageError,
+  InvalidPublicKeyError,
   InvalidSecretKeyError,
   InvalidSplitError,
   InvalidTokenError,
@@ -150,6 +151,7 @@ export {
   WillNotTriggeredError,
   ZeroAmountError,
   mapContractError,
+  UnsupportedBatchSizeError,
 } from './errors';
 
 export { RequestQueue, RequestPriority } from './requestQueue';

@@ -120,7 +120,7 @@ console.log(will.status, will.balance, will.beneficiaries);
 | `getWillsByOwner` | Lists every will owned by an address, with optional client-side pagination | `owner`, `PaginationOptions?` | `Promise<Will[] \| { wills, nextCursor }>` |
 | `getWillsByBeneficiary` | Lists every will an address is named in, with optional client-side pagination | `beneficiary`, `PaginationOptions?` | `Promise<Will[] \| { wills, nextCursor }>` |
 | `guardianTrigger` | Casts a guardian vote; 2 of 3 forces an early release | `willId` | `Promise<{ txHash }>` |
-| `batch` | Simulates, signs, and submits multiple contract operations atomically | `BatchOperation[]` | `Promise<BatchResult>` |
+| `batch` | Simulates, signs, and submits a single raw contract operation (Soroban allows one per transaction) | `BatchOperation[]` | `Promise<BatchResult>` |
 
 Every method also accepts an optional final `{ timeoutMs }` argument. RPC work flows through a
 shared FIFO queue configured by `maxConcurrentRequests` and `requestsPerSecond`, preventing bursts
@@ -151,23 +151,10 @@ Pass options to the `SoroWillClient` constructor (or to `forNetwork()`/`fromEnv(
 
 ## Batch transactions
 
-`batch` combines native contract calls into one Stellar transaction and therefore one Freighter
-signature prompt:
+`batch` submits a raw contract call by its native method name and arguments:
 
 ```ts
 const result = await client.batch([
-  {
-    method: 'create_will',
-    args: {
-      owner: wallet.publicKey,
-      token: 'CBIEL...DAMA',
-      amount: 10_000_000n,
-      beneficiaries: [{ address: 'GBEN...AAAA', percentage: 100 }],
-      checkin_period_days: 90n,
-      grace_period_days: 7n,
-      guardians: [],
-    },
-  },
   {
     method: 'check_in',
     args: { will_id: 1n, owner: wallet.publicKey },
@@ -175,7 +162,9 @@ const result = await client.batch([
 ]);
 ```
 
-The whole batch is simulated and assembled together, signed once, and submitted atomically.
+Soroban transactions may contain only a single `InvokeHostFunction` operation, so multiple contract
+calls cannot be combined into one atomic transaction. `batch` therefore accepts exactly one
+operation and throws `UnsupportedBatchSizeError` for larger batches; submit each call separately.
 
 ## Debugging and structured logging
 

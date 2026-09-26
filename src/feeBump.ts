@@ -5,7 +5,7 @@ import {
   rpc,
 } from '@stellar/stellar-sdk';
 
-import { InvalidSecretKeyError } from './errors';
+import { InvalidPublicKeyError, InvalidSecretKeyError } from './errors';
 import { NETWORK_CONFIG, type SoroWillNetwork } from './SoroWillClient';
 
 interface SendTransactionErrorResponse {
@@ -47,9 +47,21 @@ export interface SubmitFeeBumpOptions {
  * user's side.
  *
  * @returns The base64-encoded XDR of the fee-bump transaction envelope.
+ * @throws {InvalidPublicKeyError} if `feeSourcePublicKey` is not a valid Stellar public key.
  */
 export async function buildFeeBumpXdr(options: FeeBumpOptions): Promise<string> {
   const config = NETWORK_CONFIG[options.network];
+
+  const { feeSourcePublicKey } = options;
+  if (typeof feeSourcePublicKey !== 'string' || !feeSourcePublicKey.startsWith('G')) {
+    throw new InvalidPublicKeyError('feeSourcePublicKey');
+  }
+  let feeSource: Keypair;
+  try {
+    feeSource = Keypair.fromPublicKey(feeSourcePublicKey);
+  } catch (error) {
+    throw new InvalidPublicKeyError('feeSourcePublicKey', { cause: error });
+  }
 
   const innerTx = TransactionBuilder.fromXDR(
     options.innerTransactionXdr,
@@ -57,7 +69,7 @@ export async function buildFeeBumpXdr(options: FeeBumpOptions): Promise<string> 
   ) as Transaction;
 
   const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
-    Keypair.fromPublicKey(options.feeSourcePublicKey),
+    feeSource,
     options.fee,
     innerTx,
     config.networkPassphrase,
@@ -90,6 +102,15 @@ export function signFeeBumpXdr(
   feeBump.addDecoratedSignature(sig);
 
   return feeBump.toXDR();
+}
+
+/** Renders an XDR value (or array of values) from an RPC response as base64 for error messages. */
+function xdrToString(value: unknown): string {
+  if (Array.isArray(value)) return value.map(xdrToString).join(', ');
+  if (value && typeof (value as { toXDR?: unknown }).toXDR === 'function') {
+    return (value as { toXDR: (format: 'base64') => string }).toXDR('base64');
+  }
+  return String(value);
 }
 
 /**
@@ -125,7 +146,14 @@ export async function submitFeeBumpTransaction(
   const pollAttempts = options.pollAttempts ?? 30;
   const txResponse = await server.pollTransaction(sendResponse.hash, { attempts: pollAttempts });
   if (txResponse.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
-    throw new Error(`Fee-bump transaction did not succeed: ${txResponse.status}`);
+    const failed = txResponse as { resultXdr?: unknown; diagnosticEventsXdr?: unknown };
+    const resultDetail = failed.resultXdr ? ` (result: ${xdrToString(failed.resultXdr)})` : '';
+    const diagnosticDetail = failed.diagnosticEventsXdr ?
+      ` (diagnostics: ${xdrToString(failed.diagnosticEventsXdr)})` : '';
+    throw new Error(
+      `Fee-bump transaction did not succeed: ${txResponse.status}${resultDetail}${diagnosticDetail}`,
+      { cause: txResponse },
+    );
   }
 
   return {

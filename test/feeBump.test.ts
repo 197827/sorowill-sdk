@@ -152,6 +152,7 @@ import {
   submitFeeBumpTransaction,
   submitFeeBump,
 } from '../src/feeBump';
+import { InvalidPublicKeyError } from '../src/errors';
 
 /** Builds a placeholder inner-transaction XDR for the mocked stellar-sdk above. */
 function makeInnerTxXdr(_networkPassphrase: string): string {
@@ -193,6 +194,25 @@ describe('feeBump', () => {
       });
 
       expect(xdr).toBeTruthy();
+    });
+
+    it('should throw InvalidPublicKeyError for a malformed feeSourcePublicKey', async () => {
+      await expect(
+        buildFeeBumpXdr({
+          network: 'testnet',
+          innerTransactionXdr: 'INNER_TX_XDR',
+          feeSourcePublicKey: 'SNOTAPUBLICKEY',
+          fee: '5000',
+        }),
+      ).rejects.toThrow(InvalidPublicKeyError);
+      await expect(
+        buildFeeBumpXdr({
+          network: 'testnet',
+          innerTransactionXdr: 'INNER_TX_XDR',
+          feeSourcePublicKey: 'SNOTAPUBLICKEY',
+          fee: '5000',
+        }),
+      ).rejects.toThrow(/feeSourcePublicKey/);
     });
   });
 
@@ -275,6 +295,29 @@ describe('feeBump', () => {
           feeBumpXdr: 'SIGNED_FEE_BUMP_XDR',
         }),
       ).rejects.toThrow(/Fee-bump transaction did not succeed: ERROR/);
+    });
+
+    it('should include resultXdr and diagnostics in the non-success error message', async () => {
+      mockState.sendTransaction.mockResolvedValueOnce({
+        status: 'PENDING',
+        hash: 'TX_HASH_789',
+      });
+      mockState.pollTransaction.mockResolvedValueOnce({
+        status: 'FAILED',
+        resultXdr: { toXDR: () => 'RESULT_XDR_BASE64' },
+        diagnosticEventsXdr: [{ toXDR: () => 'DIAG_EVENT_BASE64' }],
+      });
+
+      await expect(
+        submitFeeBumpTransaction({
+          network: 'testnet',
+          feeBumpXdr: 'SIGNED_FEE_BUMP_XDR',
+          pollAttempts: 5,
+        }),
+      ).rejects.toThrow(
+        'Fee-bump transaction did not succeed: FAILED (result: RESULT_XDR_BASE64) (diagnostics: DIAG_EVENT_BASE64)',
+      );
+      expect(mockState.pollTransaction).toHaveBeenCalledWith('TX_HASH_789', { attempts: 5 });
     });
   });
 

@@ -19,7 +19,12 @@ vi.mock('../src/wallet', () => ({
 }));
 
 import { SoroWillClient } from '../src/SoroWillClient';
-import { mapContractError, NotOwnerError, RequestTimeoutError } from '../src/errors';
+import {
+  mapContractError,
+  NotOwnerError,
+  RequestTimeoutError,
+  UnsupportedBatchSizeError,
+} from '../src/errors';
 import { HookManager } from '../src/hooks';
 import { RequestQueue } from '../src/requestQueue';
 
@@ -65,7 +70,7 @@ describe('contract error mapping', () => {
 });
 
 describe('batch transactions', () => {
-  it('prepares, signs, and submits two operations as one transaction', async () => {
+  it('prepares, signs, and submits a single operation as one transaction', async () => {
     let preparedOperationCount = 0;
     const fakeSpec = {
       funcArgsToScVals: () => [] as xdr.ScVal[],
@@ -90,16 +95,31 @@ describe('batch transactions', () => {
     });
     Object.defineProperty(client, 'specPromise', { value: Promise.resolve(fakeSpec) });
 
+    await expect(client.batch([{ method: 'first_operation', args: {} }])).resolves.toEqual({
+      txHash: 'batch-hash',
+      createdAt: 1_700_000_000,
+    });
+    expect(preparedOperationCount).toBe(1);
+  });
+
+  it('rejects batches with more than one operation, since Soroban allows one invocation per transaction', async () => {
+    const getAccount = vi.fn();
+    const client = new SoroWillClient({
+      network: 'testnet',
+      contractId: 'CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE',
+      rpcServer: { getAccount } as never,
+    });
+
     await expect(
       client.batch([
         { method: 'first_operation', args: {} },
         { method: 'second_operation', args: {} },
       ]),
-    ).resolves.toEqual({ txHash: 'batch-hash', createdAt: 1_700_000_000 });
-    expect(preparedOperationCount).toBe(2);
+    ).rejects.toThrow(UnsupportedBatchSizeError);
+    expect(getAccount).not.toHaveBeenCalled();
   });
 
-  it('runs invoke hooks for each operation', async () => {
+  it('runs invoke hooks for the operation', async () => {
     const fakeSpec = {
       funcArgsToScVals: () => [] as xdr.ScVal[],
     };
@@ -130,16 +150,10 @@ describe('batch transactions', () => {
     });
     Object.defineProperty(client, 'specPromise', { value: Promise.resolve(fakeSpec) });
 
-    await client.batch([
-      { method: 'first_operation', args: { value: 1 } },
-      { method: 'second_operation', args: { value: 2 } },
-    ]);
+    await client.batch([{ method: 'first_operation', args: { value: 1 } }]);
 
-    expect(beforeMethods).toEqual(['first_operation', 'second_operation']);
-    expect(afterResults).toEqual([
-      { method: 'first_operation', txHash: 'batch-hash', error: null },
-      { method: 'second_operation', txHash: 'batch-hash', error: null },
-    ]);
+    expect(beforeMethods).toEqual(['first_operation']);
+    expect(afterResults).toEqual([{ method: 'first_operation', txHash: 'batch-hash', error: null }]);
   });
 });
 

@@ -53,6 +53,7 @@ import {
   SoroWillInvalidAmountError,
   SoroWillRestoreRequiredError,
   TooManyGuardiansError,
+  UnsupportedBatchSizeError,
   WalletNetworkMismatchError,
   WebSocketNotConfiguredError,
 } from './errors';
@@ -378,7 +379,7 @@ function mapWill(raw: unknown): Will {
     owner: raw.owner,
     token: raw.token,
     balance: raw.balance.toString(),
-    beneficiaries: [...raw.beneficiaries],
+    beneficiaries: fromContractBeneficiaries(raw.beneficiaries),
     checkinPeriodDays: Number(raw.checkin_period_days),
     gracePeriodDays: Number(raw.grace_period_days),
     lastCheckin: new Date(Number(raw.last_checkin) * 1000),
@@ -429,6 +430,34 @@ function toContractBeneficiaries(
     address: beneficiary.address,
     basis_points: beneficiary.percentage * PERCENT_TO_BASIS_POINTS,
   }));
+}
+
+/**
+ * Maps the contract's `{ address, basis_points }` beneficiaries back to the
+ * SDK's 0-100 `percentage` scale (the inverse of {@link toContractBeneficiaries}).
+ * Entries already carrying a `percentage` are passed through unchanged. The SDK
+ * only ever writes whole percentages, so a `basis_points` value that is not a
+ * multiple of 100 cannot be represented and is rejected rather than rounded.
+ */
+function fromContractBeneficiaries(beneficiaries: readonly unknown[]): Beneficiary[] {
+  return beneficiaries.map((entry) => {
+    const { address, basis_points: basisPoints, percentage } = entry as {
+      address: string;
+      basis_points?: unknown;
+      percentage?: number;
+    };
+    if (basisPoints === undefined) {
+      return { address, percentage: percentage as number };
+    }
+    const bp = Number(basisPoints);
+    if (!Number.isInteger(bp) || bp % PERCENT_TO_BASIS_POINTS !== 0) {
+      throw new SoroWillError(
+        `SoroWill received beneficiary basis_points ${String(basisPoints)} for ${address}, which is not a ` +
+          'whole percentage (a multiple of 100) and cannot be represented on the SDK\'s 0-100 percentage scale.',
+      );
+    }
+    return { address, percentage: bp / PERCENT_TO_BASIS_POINTS };
+  });
 }
 
 /**
@@ -1182,11 +1211,16 @@ export class SoroWillClient {
   }
 
   /**
-   * Combines contract calls into one atomic transaction and one wallet signature prompt.
+   * Simulates, signs, and submits a raw contract call given by its native method name and arguments.
    * Arguments use the native names and values accepted by the deployed contract spec.
+   *
+   * Soroban transactions may contain only a single `InvokeHostFunction` operation, so a batch
+   * must contain exactly one operation; multiple calls cannot be combined into one atomic
+   * transaction and must be submitted separately.
    *
    * @returns The transaction hash and creation timestamp.
    * @throws {RangeError} If the batch contains zero operations.
+   * @throws {UnsupportedBatchSizeError} If the batch contains more than one operation.
    * @throws {SoroWillError} If the transaction simulation/submission fails.
    * @throws {RequestTimeoutError} If the RPC request exceeds its configured timeout.
    * @throws {WillContractError} Mapped contract-level errors from any operation in the batch.
@@ -1198,6 +1232,9 @@ export class SoroWillClient {
   ): Promise<BatchResult> {
     if (operations.length === 0) {
       throw new RangeError('A batch must contain at least one operation');
+    }
+    if (operations.length > 1) {
+      throw new UnsupportedBatchSizeError(operations.length);
     }
     const hookContexts = operations.map(({ method, args }) => ({
       before: {
@@ -1222,15 +1259,13 @@ export class SoroWillClient {
         this.contract.call(method, ...spec.funcArgsToScVals(method, args)),
       );
 
-      // Build a multi-operation transaction manually (batch has its own path
-      // since buildTransaction handles single operations)
       const publicKey = await this.getWalletPublicKey();
       const account = await this.rpc(
         () => this.rpcPool.withFailover((server) => server.getAccount(publicKey)),
         options,
       );
       const builder = new TransactionBuilder(account, {
-        fee: (BigInt(BASE_FEE) * BigInt(contractOperations.length)).toString(),
+        fee: BASE_FEE,
         networkPassphrase: this.networkPassphrase,
       });
       for (const op of contractOperations) {
