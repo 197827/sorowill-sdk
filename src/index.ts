@@ -184,6 +184,7 @@ export {
   formatUSDC,
   getNextActionableState,
   getTimeUntilCheckin,
+  hasDuplicateBeneficiaries,
   isBeneficiary,
   isCheckinDue,
   isGuardian,
