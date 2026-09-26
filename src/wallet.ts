@@ -295,4 +295,5 @@ export const freighterAdapter: WalletAdapter = {
   disconnect: () => defaultFreighterWalletAdapter.disconnect(),
   getPublicKey,
   signTransaction,
+  getNetwork: () => defaultFreighterWalletAdapter.getNetwork(),
 };
