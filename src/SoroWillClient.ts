@@ -3,6 +3,7 @@ import {
   BASE_FEE,
   Contract,
   Networks,
+  StrKey,
   Transaction,
   TransactionBuilder,
   rpc,
@@ -42,12 +43,14 @@ import {
 import {
   AccountNotFundedError,
   BeneficiaryValidationError,
+  GuardianValidationError,
   InvalidDayCountError,
   InvalidContractIdError,
   InvalidCursorError,
   InvalidPaginationOptionsError,
   InvokeFailedError,
   mapContractError,
+  RequestTimeoutError,
   SimulationError,
   SoroWillError,
   SoroWillInvalidAmountError,
@@ -774,7 +777,23 @@ export class SoroWillClient {
     if (params.guardians.length > MAX_GUARDIANS) {
       throw new TooManyGuardiansError(params.guardians.length, MAX_GUARDIANS);
     }
+    if (!StrKey.isValidContract(params.token)) {
+      throw new InvalidContractIdError(params.token);
+    }
     const owner = await this.getWalletPublicKey();
+    const seenGuardians = new Set<string>();
+    for (const guardian of params.guardians) {
+      if (!StrKey.isValidEd25519PublicKey(guardian)) {
+        throw new GuardianValidationError('invalid_address', guardian);
+      }
+      if (seenGuardians.has(guardian)) {
+        throw new GuardianValidationError('duplicate', guardian);
+      }
+      if (guardian === owner) {
+        throw new GuardianValidationError('owner_is_guardian', guardian);
+      }
+      seenGuardians.add(guardian);
+    }
     const { txHash, returnValue } = await this.invoke(
       'create_will',
       {
@@ -1491,9 +1510,12 @@ export class SoroWillClient {
 
     const poll = async (): Promise<void> => {
       if (closed) return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
       try {
         const response = await this.fetchImpl(this.eventRpcUrl, {
           method: 'POST',
+          signal: controller.signal,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             jsonrpc: '2.0',
@@ -1505,9 +1527,18 @@ export class SoroWillClient {
             },
           }),
         });
+        if (!response.ok) {
+          throw new SoroWillError(`getEvents poll failed with HTTP status ${response.status}`);
+        }
         const payload = (await response.json()) as {
           result?: { events?: RawEventRecord[]; nextCursor?: string };
+          error?: { code?: number; message?: string };
         };
+        if (payload.error) {
+          throw new SoroWillError(
+            `getEvents poll failed with JSON-RPC error ${payload.error.code}: ${payload.error.message ?? 'unknown error'}`,
+          );
+        }
         for (const raw of payload.result?.events ?? []) {
           if (closed) break;
           listener(mapEventRecord(raw, this.getContractId()));
@@ -1516,8 +1547,13 @@ export class SoroWillClient {
           cursor = payload.result.nextCursor;
         }
       } catch (err) {
-        options.onError?.(err instanceof Error ? err : new Error(String(err)));
+        if (controller.signal.aborted) {
+          options.onError?.(new RequestTimeoutError(this.timeoutMs));
+        } else {
+          options.onError?.(err instanceof Error ? err : new Error(String(err)));
+        }
       } finally {
+        clearTimeout(timeout);
         if (!closed) {
           timer = setTimeout(() => void poll(), pollIntervalMs);
         }

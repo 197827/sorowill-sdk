@@ -18,14 +18,18 @@ export const SOROBAN_LEDGER_CLOSE_TIME_MS = 5_000;
  * Formats a base-unit token amount (e.g. contract-side `i128` stroops) as a
  * human-readable decimal string with thousands separators, e.g.
  * `formatUSDC(12345000000n) === "1,234.50"`.
+ *
+ * The result always has exactly two fractional digits. Sub-cent amounts are
+ * rounded half up (away from zero for negative values), so
+ * `formatUSDC(19_990_000n) === "2.00"` and `formatUSDC(19_949_999n) === "1.99"`.
  */
 export function formatUSDC(stroops: bigint, decimals = USDC_DECIMALS): string {
   const negative = stroops < 0n;
   const absolute = negative ? -stroops : stroops;
   const base = 10n ** BigInt(decimals);
-  const whole = absolute / base;
-  const fraction = absolute % base;
-  const cents = fraction / 10n ** BigInt(Math.max(decimals - 2, 0));
+  const totalCents = (absolute * 100n + base / 2n) / base;
+  const whole = totalCents / 100n;
+  const cents = totalCents % 100n;
 
   const wholeFormatted = whole.toLocaleString('en-US');
   const centsFormatted = cents.toString().padStart(2, '0');
@@ -45,13 +49,15 @@ export function toStroops(usdc: string, decimals = USDC_DECIMALS): bigint {
 
   const negative = cleaned.startsWith('-');
   const unsigned = negative ? cleaned.slice(1) : cleaned;
-  const [wholePart = '', fractionPart = ''] = unsigned.split('.');
-  if (fractionPart.length > USDC_DECIMALS) {
+  const [wholePart = '', rawFraction = ''] = unsigned.split('.');
+  // Trailing zeros carry no precision, so "1.50" is valid even for 1-decimal tokens.
+  const fractionPart = rawFraction.replace(/0+$/, '');
+  if (fractionPart.length > decimals) {
     throw new Error(
-      `Invalid USDC amount: "${usdc}" has more than ${USDC_DECIMALS} fractional digits, which would silently lose precision.`,
+      `Invalid USDC amount: "${usdc}" has more than ${decimals} fractional digits, which would silently lose precision.`,
     );
   }
-  const paddedFraction = fractionPart.padEnd(USDC_DECIMALS, '0');
+  const paddedFraction = fractionPart.padEnd(decimals, '0');
 
   const whole = BigInt(wholePart === '' ? '0' : wholePart);
   const fraction = BigInt(paddedFraction === '' ? '0' : paddedFraction);

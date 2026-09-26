@@ -305,7 +305,7 @@ describe('SoroWillClient', () => {
     await expect(
       client.previewFee('create_will', {
         owner: 'GTESTACCOUNT',
-        token: 'CTOKEN',
+        token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
         amount: 1000n,
       }),
     ).resolves.toEqual({ resourceFee: '1500' });
@@ -341,6 +341,7 @@ describe('SoroWillClient', () => {
     let subscription: EventSubscription | undefined;
 
     const fetchMock = vi.fn(async () => ({
+      ok: true,
       json: async () => ({
         result: {
           events: [
@@ -472,6 +473,7 @@ describe('SoroWillClient', () => {
     });
 
     const fallbackFetch = vi.fn(async () => ({
+      ok: true,
       json: async () => ({
         result: {
           events: [
@@ -546,7 +548,7 @@ describe('SoroWillClient', () => {
 
       await expect(
         client.createWill({
-          token: 'CTOKEN',
+          token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
           beneficiaries: [
             { address: 'GA3JE5IXBSOR6DCLZSGN7JIWQWO45RCS7PUFKKVXWSTE4Y75ISIDMHJG', percentage: 100 },
           ],

@@ -122,6 +122,7 @@ export {
   KeeperBountyExceedsMaxError,
   MergeWouldExceedLimitsError,
   NotGuardianError,
+  GuardianValidationError,
   InvalidCursorError,
   NotOwnerError,
   NotSameOwnerError,
