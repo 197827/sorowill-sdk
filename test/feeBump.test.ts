@@ -220,6 +220,42 @@ describe('feeBump', () => {
       expect(mockState.pollTransaction).toHaveBeenCalledTimes(1);
     });
 
+    it('throws a retryable error on TRY_AGAIN_LATER without polling', async () => {
+      mockState.sendTransaction.mockResolvedValueOnce({ status: 'TRY_AGAIN_LATER', hash: 'H' });
+
+      await expect(
+        submitFeeBumpTransaction({ network: 'testnet', feeBumpXdr: 'XDR' }),
+      ).rejects.toThrow(/TRY_AGAIN_LATER/);
+      expect(mockState.pollTransaction).not.toHaveBeenCalled();
+    });
+
+    it('polls the existing hash on DUPLICATE', async () => {
+      mockState.sendTransaction.mockResolvedValueOnce({ status: 'DUPLICATE', hash: 'DUP_HASH' });
+      mockState.pollTransaction.mockResolvedValueOnce({ status: 'SUCCESS', createdAt: 42 });
+
+      const result = await submitFeeBumpTransaction({ network: 'testnet', feeBumpXdr: 'XDR' });
+
+      expect(result).toEqual({ txHash: 'DUP_HASH', createdAt: 42 });
+      expect(mockState.pollTransaction).toHaveBeenCalledWith('DUP_HASH', { attempts: 30 });
+    });
+
+    it('uses an injected rpcServer', async () => {
+      const rpcServer = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: 'INJ' }),
+        pollTransaction: vi.fn().mockResolvedValue({ status: 'SUCCESS', createdAt: 7 }),
+      };
+
+      const result = await submitFeeBumpTransaction({
+        network: 'testnet',
+        feeBumpXdr: 'XDR',
+        rpcServer,
+      });
+
+      expect(result).toEqual({ txHash: 'INJ', createdAt: 7 });
+      expect(rpcServer.sendTransaction).toHaveBeenCalledTimes(1);
+      expect(mockState.sendTransaction).not.toHaveBeenCalled();
+    });
+
     it('should throw error with diagnostics when submission fails', async () => {
       mockState.sendTransaction.mockResolvedValueOnce({
         status: 'ERROR',

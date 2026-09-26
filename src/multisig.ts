@@ -122,6 +122,7 @@ export class MultisigCollector {
    * Add a signature from a signer.
    * @throws if the signer has already signed.
    * @throws if signerPublicKey is not a valid Stellar Ed25519 public key.
+   * @throws if signature is empty, not a valid decorated signature, or its hint does not match the signer.
    */
   addSignature(signerPublicKey: string, signature: string): void {
     if (!StrKey.isValidEd25519PublicKey(signerPublicKey)) {
@@ -132,6 +133,23 @@ export class MultisigCollector {
     }
     if (this._signatures.some((s) => s.signerPublicKey === signerPublicKey)) {
       throw new Error(`Signer ${signerPublicKey} has already signed`);
+    }
+    if (!signature) {
+      throw new Error(`Signature for signer ${signerPublicKey} must not be empty`);
+    }
+    let decorated: xdr.DecoratedSignature;
+    try {
+      decorated = xdr.DecoratedSignature.fromXDR(signature, 'base64');
+    } catch {
+      throw new Error(
+        `Signature for signer ${signerPublicKey} is not a valid base64-encoded decorated signature`,
+      );
+    }
+    if (decorated.signature().length !== 64) {
+      throw new Error(`Signature for signer ${signerPublicKey} must be 64 bytes`);
+    }
+    if (!decorated.hint().equals(Keypair.fromPublicKey(signerPublicKey).signatureHint())) {
+      throw new Error(`Signature hint does not match signer ${signerPublicKey}`);
     }
     this._signatures.push({ signerPublicKey, signature });
   }
