@@ -2,7 +2,7 @@ import { Account, xdr } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
 
 import { MemoryCachePersistenceAdapter } from '../src/cache';
-import { WalletNetworkMismatchError } from '../src/errors';
+import { RequestTimeoutError, SoroWillError, WalletNetworkMismatchError } from '../src/errors';
 import { ReadCache } from '../src/cache';
 import { SoroWillClient, type SoroWillRpcServer } from '../src/SoroWillClient';
 import type { WillEvent, WillEventSource } from '../src/events';
@@ -435,5 +435,138 @@ describe('SoroWillClient wallet network cross-check', () => {
     await expect(
       client.assertWalletNetwork({ networkPassphrase: 'Test SDF Network ; September 2015' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+const CONTRACT_ID = 'CADQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQP5KR';
+
+describe('SoroWillClient.getNetworkFeeStats receiver and support (#363)', () => {
+  it('invokes getFeeStats with its server as the receiver', async () => {
+    const rpcServer = createRpcServer();
+    const receiverAwareServer = Object.assign(Object.create(null), rpcServer, {
+      latestLedger: 4242,
+      async getFeeStats(this: { latestLedger: number }) {
+        return { latestLedger: this.latestLedger } as never;
+      },
+    }) as SoroWillRpcServer;
+    const client = new SoroWillClient({
+      network: 'testnet',
+      contractId: CONTRACT_ID,
+      readCache: false,
+      spec: createSpec({}),
+      rpcServer: receiverAwareServer,
+    });
+
+    const stats = await client.getNetworkFeeStats();
+    expect(stats.latestLedger).toBe(4242);
+  });
+
+  it('throws a SoroWillError when the server does not support getFeeStats', async () => {
+    const rpcServer = createRpcServer();
+    delete (rpcServer as { getFeeStats?: unknown }).getFeeStats;
+    const client = new SoroWillClient({
+      network: 'testnet',
+      contractId: CONTRACT_ID,
+      readCache: false,
+      spec: createSpec({}),
+      rpcServer,
+    });
+
+    await expect(client.getNetworkFeeStats()).rejects.toBeInstanceOf(SoroWillError);
+  });
+});
+
+describe('SoroWillClient read error propagation (#365)', () => {
+  it('propagates RequestTimeoutError unchanged from reads', async () => {
+    const client = new SoroWillClient({
+      network: 'testnet',
+      contractId: CONTRACT_ID,
+      readCache: false,
+      retry: { maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0 },
+      timeoutMs: 10,
+      spec: createSpec({ get_will: [makeRawWill(1n)] }),
+      rpcServer: createRpcServer({
+        simulateTransactionImpl: () => new Promise(() => undefined),
+      }),
+    });
+
+    await expect(client.getWill('1')).rejects.toBeInstanceOf(RequestTimeoutError);
+  });
+
+  it('propagates AbortError unchanged from reads', async () => {
+    const controller = new AbortController();
+    const client = new SoroWillClient({
+      network: 'testnet',
+      contractId: CONTRACT_ID,
+      readCache: false,
+      retry: { maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0 },
+      spec: createSpec({ get_will: [makeRawWill(1n)] }),
+      rpcServer: createRpcServer(),
+    });
+    controller.abort();
+
+    const error = await client.getWill('1', { signal: controller.signal }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe('AbortError');
+  });
+});
+
+describe('SoroWillClient constructor option validation (#366)', () => {
+  const base = { network: 'testnet' as const, contractId: CONTRACT_ID, readCache: false as const };
+
+  it.each([0, -1, 1.5, Number.NaN])('rejects retry.maxAttempts = %s', (maxAttempts) => {
+    expect(() => new SoroWillClient({ ...base, retry: { maxAttempts } })).toThrow(RangeError);
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])('rejects retry delays = %s', (delay) => {
+    expect(() => new SoroWillClient({ ...base, retry: { initialDelayMs: delay } })).toThrow(RangeError);
+    expect(() => new SoroWillClient({ ...base, retry: { maxDelayMs: delay } })).toThrow(RangeError);
+  });
+
+  it.each([0.5, 0, Number.NaN])('rejects retry.backoffFactor = %s', (backoffFactor) => {
+    expect(() => new SoroWillClient({ ...base, retry: { backoffFactor } })).toThrow(RangeError);
+  });
+
+  it.each([0, -5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects transactionTimeoutSeconds = %s',
+    (transactionTimeoutSeconds) => {
+      expect(() => new SoroWillClient({ ...base, transactionTimeoutSeconds })).toThrow(RangeError);
+    },
+  );
+
+  it.each([0, -1, Number.NaN])('rejects defaultPollIntervalMs = %s', (defaultPollIntervalMs) => {
+    expect(() => new SoroWillClient({ ...base, defaultPollIntervalMs })).toThrow(RangeError);
+  });
+});
+
+describe('SoroWillClient write-path failover (#367)', () => {
+  it('fails over to the backup endpoint for getAccount and prepareTransaction', async () => {
+    const calls = { getAccount: 0, prepareTransaction: 0 };
+    const rpcServer = createRpcServer();
+    const baseGetAccount = rpcServer.getAccount.bind(rpcServer);
+    const basePrepare = rpcServer.prepareTransaction.bind(rpcServer);
+    rpcServer.getAccount = async (address) => {
+      calls.getAccount += 1;
+      if (calls.getAccount === 1) throw new Error('fetch failed');
+      return baseGetAccount(address);
+    };
+    rpcServer.prepareTransaction = async (tx) => {
+      calls.prepareTransaction += 1;
+      if (calls.prepareTransaction === 1) throw new Error('ECONNREFUSED');
+      return basePrepare(tx);
+    };
+
+    const client = new SoroWillClient({
+      network: 'testnet',
+      contractId: CONTRACT_ID,
+      rpcUrls: ['https://primary.example', 'https://backup.example'],
+      wallet: new StubWalletAdapter(),
+      readCache: false,
+      spec: createSpec({ get_will: [makeRawWill(1n)], check_in: [undefined] }),
+      rpcServer,
+    });
+
+    await expect(client.checkIn('1')).resolves.toMatchObject({ txHash: 'abc123' });
+    expect(calls).toEqual({ getAccount: 2, prepareTransaction: 2 });
   });
 });
