@@ -110,6 +110,45 @@ export class InvalidSecretKeyError extends SoroWillError {
 }
 
 /**
+ * Raised when a public key passed to an SDK function (for example the
+ * `feeSourcePublicKey` of {@link buildFeeBumpXdr}) is not a valid Stellar
+ * account public key, so callers get a typed error naming the offending field
+ * rather than a low-level StrKey-decoding message.
+ */
+export class InvalidPublicKeyError extends SoroWillError {
+  constructor(
+    public readonly field: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `${field} is not a valid Stellar public key. ` +
+        'A Stellar public key must be a 56-character StrKey starting with "G" and containing valid base32 characters.',
+      options,
+    );
+  }
+}
+
+/**
+ * Raised when {@link SoroWillClient.batch} is given more than one operation.
+ * Soroban transactions may contain only a single `InvokeHostFunction`
+ * operation, so a multi-operation batch would always be rejected by the
+ * network at submission time.
+ */
+export class UnsupportedBatchSizeError extends SoroWillError {
+  constructor(
+    public readonly operationCount: number,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `A batch may contain only one operation, but ${operationCount} were provided. ` +
+        'Soroban transactions allow a single contract invocation (InvokeHostFunction operation) each; ' +
+        'submit each call as its own transaction instead.',
+      options,
+    );
+  }
+}
+
+/**
  * Raised when the transaction XDR passed to {@link MultisigCollector} constructor
  * or {@link MultisigCollector.fromJSON} is not a syntactically valid Stellar
  * transaction envelope XDR. This includes malformed base64 or unsupported

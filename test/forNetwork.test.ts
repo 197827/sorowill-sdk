@@ -133,6 +133,10 @@ describe('cancelWill refundAmount correctness', () => {
 
     Object.defineProperty(client, 'specPromise', { value: Promise.resolve(fakeSpec) });
     Object.defineProperty(client, 'server', { value: fakeServer });
+    // Write-path RPC calls go through the failover pool, so route it to the fake too.
+    Object.defineProperty(client, 'rpcPool', {
+      value: { withFailover: <T>(op: (server: typeof fakeServer) => Promise<T>) => op(fakeServer) },
+    });
 
     const { txHash, refundAmount } = await client.cancelWill('1');
 

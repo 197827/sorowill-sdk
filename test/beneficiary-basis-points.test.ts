@@ -141,6 +141,7 @@ vi.mock('@stellar/stellar-sdk', async () => {
 });
 
 import { SoroWillClient } from '../src/SoroWillClient';
+import { calculateShares } from '../src/utils';
 
 function makeClient() {
   return new SoroWillClient({ network: 'testnet', contractId: 'CCONTRACT' });
@@ -203,5 +204,66 @@ describe('beneficiary percentage -> contract basis points', () => {
       { address: 'GDPS7CHKGAWBCTWD4EWZ4MMFG56S4NCALGQOUBMX6DSCUIZFRQHHP3HB', basis_points: 3400 },
     ]);
     expect(bound.reduce((sum, b) => sum + b.basis_points, 0)).toBe(10_000);
+  });
+});
+
+describe('contract basis points -> beneficiary percentage (#362)', () => {
+  const A = 'GC6HGXZGSXRY2NLLRYGVHCCDNULAQ6N2QX6Q47UUW42FTH2HBAXTM2WO';
+  const B = 'GAKUAEWGL2TSFIMEXD2VDVPX2BMJTAFFZEPJS4QQRJJF3X54P6S3QCZ6';
+
+  function rawWill(beneficiaries: unknown[]) {
+    return {
+      id: 1n,
+      owner: A,
+      token: 'CTOKEN',
+      balance: 1_000_000n,
+      beneficiaries,
+      checkin_period_days: 90n,
+      grace_period_days: 7n,
+      last_checkin: 1_700_000_000n,
+      status: 'Active',
+      guardians: [],
+      guardian_votes: 0,
+    };
+  }
+
+  beforeEach(() => {
+    mockState.funcArgsCalls.length = 0;
+    mockState.simulateTransaction.mockReset();
+  });
+
+  it('round-trips createWill beneficiaries through getWill and feeds calculateShares directly', async () => {
+    const input = [
+      { address: A, percentage: 30 },
+      { address: B, percentage: 70 },
+    ];
+    const client = makeClient();
+    await client.createWill({
+      token: 'CTOKEN',
+      amount: '1000000',
+      beneficiaries: input,
+      checkinPeriodDays: 90,
+      gracePeriodDays: 7,
+      guardians: [],
+    });
+    mockState.simulateTransaction.mockResolvedValueOnce({
+      result: { retval: rawWill(beneficiariesFor('create_will')) },
+    });
+
+    const will = await client.getWill('1');
+
+    expect(will.beneficiaries).toEqual(input);
+    expect(calculateShares(will.balance, will.beneficiaries)).toEqual([
+      { address: A, share: '300000' },
+      { address: B, share: '700000' },
+    ]);
+  });
+
+  it('rejects basis_points that are not a whole percentage', async () => {
+    mockState.simulateTransaction.mockResolvedValueOnce({
+      result: { retval: rawWill([{ address: A, basis_points: 3333 }, { address: B, basis_points: 6667 }]) },
+    });
+
+    await expect(makeClient().getWill('1')).rejects.toThrow(/basis_points 3333/);
   });
 });
