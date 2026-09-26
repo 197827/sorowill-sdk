@@ -138,8 +138,9 @@ export class RpcEndpointPool {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < this.servers.length; attempt += 1) {
-      const rpcUrl = this.rpcUrls[this.activeIndex];
-      const server = this.servers[this.activeIndex];
+      const index = this.activeIndex;
+      const rpcUrl = this.rpcUrls[index];
+      const server = this.servers[index];
 
       if (!rpcUrl || !server) {
         break;
@@ -152,8 +153,11 @@ export class RpcEndpointPool {
         if (!isRetryableRpcConnectionError(error) || attempt === this.servers.length - 1) {
           throw error;
         }
-        this.lastFailoverAt = Date.now();
-        this.activeIndex = (this.activeIndex + 1) % this.servers.length;
+        // Only advance if no concurrent call has already failed over away from this endpoint.
+        if (this.activeIndex === index) {
+          this.lastFailoverAt = Date.now();
+          this.activeIndex = (index + 1) % this.servers.length;
+        }
       }
     }
 
