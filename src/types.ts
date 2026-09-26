@@ -246,7 +246,10 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
-/** A contract invocation to include in a single batch transaction. */
+/**
+ * A contract invocation to submit via `batch`. Soroban allows only one
+ * `InvokeHostFunction` operation per transaction, so a batch holds exactly one.
+ */
 export interface BatchOperation {
   /** Contract function name, such as `create_will` or `check_in`. */
   method: string;
@@ -254,7 +257,7 @@ export interface BatchOperation {
   args: Record<string, unknown>;
 }
 
-/** Result of submitting a batch as one atomic Stellar transaction. */
+/** Result of submitting a batch (a single contract invocation) as a Stellar transaction. */
 export interface BatchResult {
   txHash: string;
   createdAt: number;
