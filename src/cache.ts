@@ -65,7 +65,7 @@ function stableStringify(value: unknown): string {
 
     if (currentValue && typeof currentValue === 'object') {
       const sortedEntries = Object.entries(currentValue as Record<string, unknown>).sort(([a], [b]) =>
-        a.localeCompare(b),
+        a < b ? -1 : a > b ? 1 : 0,
       );
       return Object.fromEntries(sortedEntries);
     }
@@ -269,65 +269,6 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
   constructor(storage: Storage, options: { key?: string } = {}) {
     if (!storage) {
       throw new Error(
-        'LocalStorageCachePersistenceAdapter requires a valid Storage object. ' +
-        'In server-side rendering (SSR) environments, window.localStorage is unavailable at construction time. ' +
-        'Either provide the Storage object conditionally (e.g., only in browsers), ' +
-        'or use MemoryCachePersistenceAdapter for SSR environments.',
-      );
-    }
-    this.storage = storage;
-    this.storageKey = options.key ?? DEFAULT_CACHE_NAMESPACE;
-    this.keysIndexKey = `${this.storageKey}:__keys__`;
-  }
+        'LocalStorageCachePersistenceAdapter requires a valid Storage o
 
-  async readAll(): Promise<PersistedCacheEntry[]> {
-    const keysJson = this.storage.getItem(this.keysIndexKey);
-    if (!keysJson) {
-      return [];
-    }
-
-    try {
-      const keys = JSON.parse(keysJson) as string[];
-      const entries: PersistedCacheEntry[] = [];
-      for (const key of keys) {
-        const entryJson = this.storage.getItem(`${this.storageKey}:${key}`);
-        if (entryJson) {
-          entries.push(JSON.parse(entryJson) as PersistedCacheEntry);
-        }
-      }
-      return entries;
-    } catch {
-      return [];
-    }
-  }
-
-  async write(entry: PersistedCacheEntry): Promise<void> {
-    this.storage.setItem(`${this.storageKey}:${entry.key}`, JSON.stringify(entry));
-    const keysJson = this.storage.getItem(this.keysIndexKey);
-    const keys = keysJson ? (JSON.parse(keysJson) as string[]) : [];
-    if (!keys.includes(entry.key)) {
-      keys.push(entry.key);
-      this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
-    }
-  }
-
-  async delete(key: string): Promise<void> {
-    this.storage.removeItem(`${this.storageKey}:${key}`);
-    const keysJson = this.storage.getItem(this.keysIndexKey);
-    if (keysJson) {
-      const keys = (JSON.parse(keysJson) as string[]).filter((k) => k !== key);
-      this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
-    }
-  }
-
-  async clear(): Promise<void> {
-    const keysJson = this.storage.getItem(this.keysIndexKey);
-    if (keysJson) {
-      const keys = JSON.parse(keysJson) as string[];
-      for (const key of keys) {
-        this.storage.removeItem(`${this.storageKey}:${key}`);
-      }
-    }
-    this.storage.removeItem(this.keysIndexKey);
-  }
-}
+/* … truncated 2099 chars — edit only what you need near the top … */
