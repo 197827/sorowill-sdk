@@ -3,8 +3,18 @@ import { StrKey } from '@stellar/stellar-sdk';
 import type { Beneficiary, Will } from './types';
 import { WillStatus } from './types';
 
-/** USDC (and most Soroban SEP-41 tokens) use 7 decimal places, matching classic Stellar asset precision. */
-const USDC_DECIMALS = 7;
+/**
+ * Default decimal precision assumed by {@link formatUSDC} and
+ * {@link toStroops} when the caller does not supply an explicit `decimals`
+ * value.
+ *
+ * **Assumption**: this default of 6 matches canonical USDC on most chains
+ * (Ethereum, Polygon, etc.). USDC-like or bridged tokens can use a different
+ * scale (e.g. 7 decimals for classic Stellar asset precision, or 8 for some
+ * wrapped tokens), so callers handling such tokens must pass the token's
+ * actual `decimals` explicitly to avoid displaying incorrect amounts.
+ */
+const USDC_DECIMALS = 6;
 
 /**
  * Approximate Soroban ledger close time, in milliseconds. Matches the
@@ -18,6 +28,11 @@ export const SOROBAN_LEDGER_CLOSE_TIME_MS = 5_000;
  * Formats a base-unit token amount (e.g. contract-side `i128` stroops) as a
  * human-readable decimal string with thousands separators, e.g.
  * `formatUSDC(12345000000n) === "1,234.50"`.
+ *
+ * `decimals` is the token's on-chain decimal precision and defaults to
+ * {@link USDC_DECIMALS} (6). Pass the token's actual `decimals` when it is
+ * not 6 (e.g. 7 for classic Stellar asset precision) so the displayed
+ * amount is scaled correctly instead of assuming a hardcoded 6.
  */
 export function formatUSDC(stroops: bigint, decimals = USDC_DECIMALS): string {
   const negative = stroops < 0n;
@@ -67,6 +82,10 @@ function expandScientificNotation(value: string): string | null {
 /**
  * Parses a human-readable decimal USDC string (e.g. `"1234.50"` or
  * `"1,234.5"`) into base units (stroops), as a `bigint`.
+ *
+ * `decimals` is the token's on-chain decimal precision and defaults to
+ * {@link USDC_DECIMALS} (6). Pass the token's actual `decimals` when it is
+ * not 6 so the parsed base units match the token's scale.
  *
  * Scientific notation (e.g. `"1e-8"`) is expanded to standard decimal
  * notation before the `decimals` offset is applied, so
@@ -204,45 +223,6 @@ export function validateBeneficiaries(beneficiaries: Beneficiary[]): boolean {
   if (!beneficiaries.every((b) => StrKey.isValidEd25519PublicKey(b.address))) {
     return false;
   }
-  if (!beneficiaries.every((b) => Number.isInteger(b.percentage) && b.percentage > 0)) {
-    return false;
-  }
-  const sum = beneficiaries.reduce((acc, b) => acc + b.percentage, 0);
-  return sum === 100;
-}
+  if (!beneficiaries.every((b) => Number.isInteger(b.percent
 
-/** Returns whether `address` is one of `will`'s guardians. */
-export function isGuardian(will: Will, address: string): boolean {
-  return will.guardians.includes(address);
-}
-
-/** Returns whether `address` is one of `will`'s beneficiaries. */
-export function isBeneficiary(will: Will, address: string): boolean {
-  return will.beneficiaries.some((b) => b.address === address);
-}
-
-/**
- * Describes what the wallet at `connectedAddress` can currently do for
- * `will`, combining its status, owner, guardians, and beneficiaries with
- * the check-in deadline. Intended to drive which action buttons a UI shows.
- */
-export interface NextActionableState {
-  canCheckIn: boolean;
-  canTrigger: boolean;
-  canEmergencyCheckIn: boolean;
-  canRelease: boolean;
-  canCancel: boolean;
-  canGuardianVote: boolean;
-}
-
-export interface NextActionableStateOptions {
-  guardianAlreadyVoted?: boolean;
-}
-
-/**
- * Computes {@link NextActionableState} for `will` from the perspective of
- * `connectedAddress`. Only the owner may check in, cancel, or emergency
- * check in; triggering and releasing are permissionless once their
- * on-chain preconditions are met; and guardians may vote for 
-
-/* … truncated 3004 chars — edit only what you need near the top … */
+/* … truncated 1388 chars — edit only what you need near the top … */
