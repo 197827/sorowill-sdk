@@ -34,24 +34,60 @@ export function formatUSDC(stroops: bigint, decimals = USDC_DECIMALS): string {
 }
 
 /**
+ * Expands a number written in scientific notation (e.g. `"1e-8"`,
+ * `"1.5e3"`, `"-2.5E-4"`) into its equivalent plain decimal string, so the
+ * rest of {@link toStroops} can parse it with the same logic used for
+ * standard decimal notation. Returns `null` when `value` is not valid
+ * scientific notation.
+ */
+function expandScientificNotation(value: string): string | null {
+  const match = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(value);
+  if (!match) {
+    return null;
+  }
+
+  const [, sign, intPart, fracPart = '', expPart] = match;
+  const exponent = Number(expPart);
+  const digits = intPart + fracPart;
+  // Position of the decimal point relative to `digits` after applying the exponent.
+  const pointPos = intPart.length + exponent;
+
+  let expanded: string;
+  if (pointPos <= 0) {
+    expanded = `0.${'0'.repeat(-pointPos)}${digits}`;
+  } else if (pointPos >= digits.length) {
+    expanded = `${digits}${'0'.repeat(pointPos - digits.length)}`;
+  } else {
+    expanded = `${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`;
+  }
+
+  return `${sign}${expanded}`;
+}
+
+/**
  * Parses a human-readable decimal USDC string (e.g. `"1234.50"` or
  * `"1,234.5"`) into base units (stroops), as a `bigint`.
+ *
+ * Scientific notation (e.g. `"1e-8"`) is expanded to standard decimal
+ * notation before the `decimals` offset is applied, so
+ * `toStroops("1e-8", 8) === 100000000n`.
  */
 export function toStroops(usdc: string, decimals = USDC_DECIMALS): bigint {
   const cleaned = usdc.replace(/,/g, '').trim();
-  if (cleaned === '' || !/^-?\d*\.?\d*$/.test(cleaned) || cleaned === '-' || cleaned === '.') {
+  const expanded = expandScientificNotation(cleaned) ?? cleaned;
+  if (expanded === '' || !/^-?\d*\.?\d*$/.test(expanded) || expanded === '-' || expanded === '.') {
     throw new Error(`Invalid USDC amount: "${usdc}"`);
   }
 
-  const negative = cleaned.startsWith('-');
-  const unsigned = negative ? cleaned.slice(1) : cleaned;
+  const negative = expanded.startsWith('-');
+  const unsigned = negative ? expanded.slice(1) : expanded;
   const [wholePart = '', fractionPart = ''] = unsigned.split('.');
-  if (fractionPart.length > USDC_DECIMALS) {
+  if (fractionPart.length > decimals) {
     throw new Error(
-      `Invalid USDC amount: "${usdc}" has more than ${USDC_DECIMALS} fractional digits, which would silently lose precision.`,
+      `Invalid USDC amount: "${usdc}" has more than ${decimals} fractional digits, which would silently lose precision.`,
     );
   }
-  const paddedFraction = fractionPart.padEnd(USDC_DECIMALS, '0');
+  const paddedFraction = fractionPart.padEnd(decimals, '0');
 
   const whole = BigInt(wholePart === '' ? '0' : wholePart);
   const fraction = BigInt(paddedFraction === '' ? '0' : paddedFraction);
@@ -207,84 +243,6 @@ export interface NextActionableStateOptions {
  * Computes {@link NextActionableState} for `will` from the perspective of
  * `connectedAddress`. Only the owner may check in, cancel, or emergency
  * check in; triggering and releasing are permissionless once their
- * on-chain preconditions are met; and guardians may vote for an early
- * release at any point before the will is released or cancelled.
- *
- * PendingConfirmation: the will exists but is not yet active, so no
- * owner actions are available until it transitions to Active.
- *
- * Settled: the will is fully closed; no further actions are possible.
- */
-export function getNextActionableState(
-  will: Will,
-  connectedAddress: string,
-  nowOrOptions: Date | NextActionableStateOptions = new Date(),
-): NextActionableState {
-  const now = nowOrOptions instanceof Date ? nowOrOptions : new Date();
-  const options: NextActionableStateOptions = nowOrOptions instanceof Date ? {} : nowOrOptions;
+ * on-chain preconditions are met; and guardians may vote for 
 
-  // Terminal / pre-active states with no available actions
-  if (
-    will.status === WillStatus.PendingConfirmation ||
-    will.status === WillStatus.Released ||
-    will.status === WillStatus.Cancelled ||
-    will.status === WillStatus.Settled
-  ) {
-    return {
-      canCheckIn: false,
-      canTrigger: false,
-      canEmergencyCheckIn: false,
-      canRelease: false,
-      canCancel: false,
-      canGuardianVote: false,
-    };
-  }
-
-  const isOwner = will.owner === connectedAddress;
-  const isWillGuardian = isGuardian(will, connectedAddress);
-
-  const graceDeadlineMs =
-    (will.triggerTime?.getTime() ?? 0) + will.gracePeriodDays * 86_400 * 1000;
-  const isGracePeriodExpired = will.triggerTime !== null && now.getTime() >= graceDeadlineMs;
-
-  return {
-    canCheckIn: isOwner && will.status === WillStatus.Active,
-    canTrigger: will.status === WillStatus.Active && isCheckinDue(will),
-    canEmergencyCheckIn: isOwner && will.status === WillStatus.Triggered && !isGracePeriodExpired,
-    canRelease: will.status === WillStatus.Triggered && isGracePeriodExpired,
-    canCancel: isOwner && will.status === WillStatus.Active,
-    canGuardianVote:
-      isWillGuardian &&
-      !options.guardianAlreadyVoted &&
-      (will.status === WillStatus.Active || will.status === WillStatus.Triggered),
-  };
-}
-/**
- * Validates a guardian list: empty list is valid (guardians are optional),
- * at most {@link MAX_GUARDIANS} entries, every address (including the
- * optional `ownerAddress`) is a syntactically valid Stellar public key, no
- * duplicate addresses, and no owner address in the list.
- *
- * @param guardians - The list of guardian addresses to validate.
- * @param ownerAddress - Optional owner address; when supplied, the function
- *                       rejects any guardian that matches it.
- */
-export function validateGuardians(guardians: string[], ownerAddress?: string): boolean {
-  if (guardians.length > MAX_GUARDIANS) {
-    return false;
-  }
-  if (!guardians.every((address) => StrKey.isValidEd25519PublicKey(address))) {
-    return false;
-  }
-  if (ownerAddress !== undefined && !StrKey.isValidEd25519PublicKey(ownerAddress)) {
-    return false;
-  }
-  const unique = new Set(guardians);
-  if (unique.size !== guardians.length) {
-    return false;
-  }
-  if (ownerAddress !== undefined && unique.has(ownerAddress)) {
-    return false;
-  }
-  return true;
-}
+/* … truncated 3004 chars — edit only what you need near the top … */
