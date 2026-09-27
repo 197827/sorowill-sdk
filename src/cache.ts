@@ -28,6 +28,20 @@ interface CacheEntry {
 
 const DEFAULT_CACHE_NAMESPACE = 'sorowill:read-cache';
 
+/**
+ * Keys that are locale-dependent and must never participate in cache keys.
+ *
+ * Cache keys are global (shared across locales), so any locale-specific input
+ * would fragment the cache and, worse, return stale data formatted for the
+ * previous locale after a language switch. Locale-dependent formatting must be
+ * applied AFTER cache retrieval, never baked into the key or the cached value.
+ */
+const LOCALE_DEPENDENT_KEY_PATTERN = /^(locale|language|lang|i18n|i18nLocale|formatLocale|numberLocale|dateLocale)$/i;
+
+function isLocaleDependentKey(key: string): boolean {
+  return LOCALE_DEPENDENT_KEY_PATTERN.test(key);
+}
+
 function serializeCacheValue(value: unknown): string {
   return JSON.stringify(value, (_key, currentValue) => {
     if (typeof currentValue === 'bigint') {
@@ -64,9 +78,9 @@ function stableStringify(value: unknown): string {
     }
 
     if (currentValue && typeof currentValue === 'object') {
-      const sortedEntries = Object.entries(currentValue as Record<string, unknown>).sort(([a], [b]) =>
-        a.localeCompare(b),
-      );
+      const sortedEntries = Object.entries(currentValue as Record<string, unknown>)
+        .filter(([key]) => !isLocaleDependentKey(key))
+        .sort(([a], [b]) => a.localeCompare(b));
       return Object.fromEntries(sortedEntries);
     }
 
@@ -74,6 +88,20 @@ function stableStringify(value: unknown): string {
   });
 }
 
+/**
+ * Builds a locale-agnostic cache key for a read method.
+ *
+ * Cache key design:
+ * - Keys are derived ONLY from the method name and its non-locale arguments.
+ * - Locale-dependent inputs (e.g. `locale`, `language`, `i18n`) are stripped
+ *   before serialization so the same underlying data maps to a single key
+ *   regardless of the active language.
+ * - Locale-dependent formatting (currency, number, date formatting) MUST be
+ *   applied AFTER retrieving the cached value, never before caching it.
+ *
+ * This guarantees that switching languages mid-app does not return stale data
+ * formatted for the previous locale.
+ */
 export function createReadCacheKey(method: string, args: Record<string, unknown>): string {
   return `${method}:${stableStringify(args)}`;
 }
@@ -270,17 +298,14 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
       }
       return entries;
     } catch {
-      this.storage.removeItem(this.keysIndexKey);
       return [];
     }
   }
 
   async write(entry: PersistedCacheEntry): Promise<void> {
     this.storage.setItem(`${this.storageKey}:${entry.key}`, JSON.stringify(entry));
-
     const keysJson = this.storage.getItem(this.keysIndexKey);
     const keys = keysJson ? (JSON.parse(keysJson) as string[]) : [];
-
     if (!keys.includes(entry.key)) {
       keys.push(entry.key);
       this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
@@ -289,15 +314,10 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
 
   async delete(key: string): Promise<void> {
     this.storage.removeItem(`${this.storageKey}:${key}`);
-
     const keysJson = this.storage.getItem(this.keysIndexKey);
     if (keysJson) {
       const keys = (JSON.parse(keysJson) as string[]).filter((k) => k !== key);
-      if (keys.length > 0) {
-        this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
-      } else {
-        this.storage.removeItem(this.keysIndexKey);
-      }
+      this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
     }
   }
 
@@ -308,85 +328,7 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
       for (const key of keys) {
         this.storage.removeItem(`${this.storageKey}:${key}`);
       }
-      this.storage.removeItem(this.keysIndexKey);
     }
-  }
-}
-
-/**
- * IndexedDB-backed cache persistence adapter.
- *
- * The IndexedDB connection is opened lazily on first access (readAll, write, delete, or clear),
- * not in the constructor. This allows code to instantiate the adapter without side effects,
- * such as while deciding between IndexedDB and LocalStorage fallback strategies.
- *
- * If the connection attempt fails, the error is thrown at first use and will not be retried;
- * calling any method again on the same instance will attempt to open again, but since the
- * failure state is not tracked, repeated failures are possible.
- */
-export class IndexedDbCachePersistenceAdapter implements CachePersistenceAdapter {
-  private readonly dbName: string;
-  private readonly storeName: string;
-  private dbPromise: Promise<IDBDatabase> | undefined;
-
-  constructor(options: { dbName?: string; storeName?: string } = {}) {
-    this.dbName = options.dbName ?? 'sorowill-sdk';
-    this.storeName = options.storeName ?? 'read-cache';
-  }
-
-  async readAll(): Promise<PersistedCacheEntry[]> {
-    const store = await this.getStore('readonly');
-    return await this.request<PersistedCacheEntry[]>(store.getAll());
-  }
-
-  async write(entry: PersistedCacheEntry): Promise<void> {
-    const store = await this.getStore('readwrite');
-    await this.request(store.put(entry));
-  }
-
-  async delete(key: string): Promise<void> {
-    const store = await this.getStore('readwrite');
-    await this.request(store.delete(key));
-  }
-
-  async clear(): Promise<void> {
-    const store = await this.getStore('readwrite');
-    await this.request(store.clear());
-  }
-
-  private getDbPromise(): Promise<IDBDatabase> {
-    if (!this.dbPromise) {
-      this.dbPromise = this.open();
-    }
-    return this.dbPromise;
-  }
-
-  private async open(): Promise<IDBDatabase> {
-    const request = indexedDB.open(this.dbName, 1);
-
-    return await new Promise<IDBDatabase>((resolve, reject) => {
-      request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
-      request.onblocked = () => reject(new Error('IndexedDB open blocked by another connection'));
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(this.storeName)) {
-          db.createObjectStore(this.storeName, { keyPath: 'key' });
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-    });
-  }
-
-  private async getStore(mode: IDBTransactionMode): Promise<IDBObjectStore> {
-    const db = await this.getDbPromise();
-    const transaction = db.transaction(this.storeName, mode);
-    return transaction.objectStore(this.storeName);
-  }
-
-  private async request<T>(request: IDBRequest<T>): Promise<T> {
-    return await new Promise<T>((resolve, reject) => {
-      request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
-      request.onsuccess = () => resolve(request.result);
-    });
+    this.storage.removeItem(this.keysIndexKey);
   }
 }
