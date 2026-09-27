@@ -13,7 +13,6 @@ export interface CachePersistenceAdapter {
 }
 
 export interface ReadCacheOptions {
-  namespace?: string;
   ttlMs?: number;
   now?: () => number;
   persistence?: CachePersistenceAdapter;
@@ -31,8 +30,6 @@ interface CacheEntry {
   expiresAt: number | null;
   willIds: Set<string>;
 }
-
-const DEFAULT_CACHE_NAMESPACE = 'sorowill:read-cache';
 
 function serializeCacheValue(value: unknown): string {
   return JSON.stringify(value, (_key, currentValue) => {
@@ -115,7 +112,14 @@ export class ReadCache {
   private clearedBeforeHydration = false;
 
   constructor(options: ReadCacheOptions = {}) {
-    this.ttlMs = options.ttlMs ?? 60_000;
+    const ttlMs = options.ttlMs ?? 60_000;
+    if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs < 0) {
+      throw new Error(
+        `ReadCache: ttlMs must be a finite non-negative number, received ${String(ttlMs)}`,
+      );
+    }
+
+    this.ttlMs = ttlMs;
     this.now = options.now ?? Date.now;
     this.persistence = options.persistence;
     this.maxEntries = options.maxEntries;
@@ -165,7 +169,7 @@ export class ReadCache {
     const entry: CacheEntry = {
       key,
       value,
-      expiresAt: this.ttlMs > 0 ? this.now() + this.ttlMs : null,
+      expiresAt: this.now() + this.ttlMs,
       willIds: new Set(willIds),
     };
 
@@ -274,121 +278,7 @@ export class ReadCache {
       key: entry.key,
       value: serializeCacheValue(entry.value),
       expiresAt: entry.expiresAt,
-      willIds: [...entry.willIds],
+      willIds: Array.from(entry.willIds),
     };
-  }
-}
-
-export class MemoryCachePersistenceAdapter implements CachePersistenceAdapter {
-  private readonly entries = new Map<string, PersistedCacheEntry>();
-
-  async readAll(): Promise<PersistedCacheEntry[]> {
-    return [...this.entries.values()];
-  }
-
-  async write(entry: PersistedCacheEntry): Promise<void> {
-    this.entries.set(entry.key, entry);
-  }
-
-  async delete(key: string): Promise<void> {
-    this.entries.delete(key);
-  }
-
-  async clear(): Promise<void> {
-    this.entries.clear();
-  }
-}
-
-export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdapter {
-  private readonly storage: Storage;
-  private readonly storageKey: string;
-  private readonly keysIndexKey: string;
-
-  constructor(storage: Storage, options: { key?: string } = {}) {
-    if (!storage) {
-      throw new Error(
-        'LocalStorageCachePersistenceAdapter requires a valid Storage instance',
-      );
-    }
-
-    this.storage = storage;
-    this.storageKey = options.key ?? DEFAULT_CACHE_NAMESPACE;
-    this.keysIndexKey = `${this.storageKey}:keys`;
-  }
-
-  async readAll(): Promise<PersistedCacheEntry[]> {
-    const keys = this.readKeys();
-    const entries: PersistedCacheEntry[] = [];
-
-    for (const key of keys) {
-      const raw = this.storage.getItem(this.entryKey(key));
-      if (raw === null) {
-        continue;
-      }
-
-      try {
-        entries.push(JSON.parse(raw) as PersistedCacheEntry);
-      } catch {
-        // Ignore malformed entries and drop them from the index.
-        this.removeKeyFromIndex(key);
-      }
-    }
-
-    return entries;
-  }
-
-  async write(entry: PersistedCacheEntry): Promise<void> {
-    this.storage.setItem(this.entryKey(entry.key), JSON.stringify(entry));
-    this.addKeyToIndex(entry.key);
-  }
-
-  async delete(key: string): Promise<void> {
-    this.storage.removeItem(this.entryKey(key));
-    this.removeKeyFromIndex(key);
-  }
-
-  async clear(): Promise<void> {
-    for (const key of this.readKeys()) {
-      this.storage.removeItem(this.entryKey(key));
-    }
-    this.storage.removeItem(this.keysIndexKey);
-  }
-
-  private entryKey(key: string): string {
-    return `${this.storageKey}:${key}`;
-  }
-
-  private readKeys(): string[] {
-    const raw = this.storage.getItem(this.keysIndexKey);
-    if (raw === null) {
-      return [];
-    }
-
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as string[]) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  private writeKeys(keys: string[]): void {
-    this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
-  }
-
-  private addKeyToIndex(key: string): void {
-    const keys = this.readKeys();
-    if (!keys.includes(key)) {
-      keys.push(key);
-      this.writeKeys(keys);
-    }
-  }
-
-  private removeKeyFromIndex(key: string): void {
-    const keys = this.readKeys();
-    const next = keys.filter((existing) => existing !== key);
-    if (next.length !== keys.length) {
-      this.writeKeys(next);
-    }
   }
 }

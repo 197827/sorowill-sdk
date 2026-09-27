@@ -79,4 +79,35 @@ describe('ReadCache', () => {
     expect(second).toBe('value');
     expect(loader).toHaveBeenCalledTimes(1);
   });
+
+  describe('ttlMs validation', () => {
+    it('accepts a finite non-negative ttlMs', () => {
+      expect(() => new ReadCache(adapter, { ttlMs: 0 })).not.toThrow();
+      expect(() => new ReadCache(adapter, { ttlMs: 1000 })).not.toThrow();
+    });
+
+    it('throws for a negative ttlMs', () => {
+      expect(() => new ReadCache(adapter, { ttlMs: -1 })).toThrow(
+        /ttlMs/,
+      );
+    });
+
+    it('throws for NaN ttlMs', () => {
+      expect(() => new ReadCache(adapter, { ttlMs: Number.NaN })).toThrow(
+        /ttlMs/,
+      );
+    });
+
+    it('throws for Infinity ttlMs', () => {
+      expect(() => new ReadCache(adapter, { ttlMs: Number.POSITIVE_INFINITY })).toThrow(
+        /ttlMs/,
+      );
+    });
+
+    it('throws for -Infinity ttlMs', () => {
+      expect(() => new ReadCache(adapter, { ttlMs: Number.NEGATIVE_INFINITY })).toThrow(
+        /ttlMs/,
+      );
+    });
+  });
 });
