@@ -17,6 +17,12 @@ export interface ReadCacheOptions {
   ttlMs?: number;
   now?: () => number;
   persistence?: CachePersistenceAdapter;
+  /**
+   * Maximum number of entries to keep in the cache. When the number of entries
+   * exceeds this limit, the least-recently-used entries are evicted (and removed
+   * from persistence). When omitted, the cache is unbounded.
+   */
+  maxEntries?: number;
 }
 
 interface CacheEntry {
@@ -95,6 +101,7 @@ export class ReadCache {
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly persistence: CachePersistenceAdapter | undefined;
+  private readonly maxEntries: number | undefined;
   private readonly readyPromise: Promise<void>;
   /**
    * Keys written or deleted after construction but before hydration completes.
@@ -111,6 +118,7 @@ export class ReadCache {
     this.ttlMs = options.ttlMs ?? 60_000;
     this.now = options.now ?? Date.now;
     this.persistence = options.persistence;
+    this.maxEntries = options.maxEntries;
     this.readyPromise = this.hydrate();
   }
 
@@ -140,6 +148,10 @@ export class ReadCache {
       return undefined;
     }
 
+    // Refresh recency for LRU ordering: re-inserting moves the key to the end.
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+
     return entry.value as T;
   }
 
@@ -158,6 +170,8 @@ export class ReadCache {
     };
 
     this.touchedKeys.add(key);
+    // Delete before set so an updated key moves to the most-recent position.
+    this.entries.delete(key);
     this.entries.set(key, entry);
     void this.persistence
       ?.write(this.toPersistedEntry(entry))
@@ -165,6 +179,8 @@ export class ReadCache {
         // Silently ignore persistence failures to prevent unhandled rejections
         // The cache remains functional in-memory; only durability is lost
       });
+
+    this.evictIfNeeded();
   }
 
   async invalidateByWillId(willId: string): Promise<void> {
@@ -187,6 +203,26 @@ export class ReadCache {
       // Silently ignore persistence failures to prevent unhandled rejections
       // The cache is cleared in-memory; only durability guarantee is lost
     });
+  }
+
+  private evictIfNeeded(): void {
+    if (this.maxEntries === undefined) {
+      return;
+    }
+
+    while (this.entries.size > this.maxEntries) {
+      const oldestKey = this.entries.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+
+      this.entries.delete(oldestKey);
+      this.touchedKeys.add(oldestKey);
+      void this.persistence?.delete(oldestKey).catch(() => {
+        // Silently ignore persistence failures to prevent unhandled rejections
+        // The entry is evicted in-memory; only durability guarantee is lost
+      });
+    }
   }
 
   private async delete(key: string): Promise<void> {
@@ -229,6 +265,8 @@ export class ReadCache {
         willIds: new Set(persistedEntry.willIds),
       });
     }
+
+    this.evictIfNeeded();
   }
 
   private toPersistedEntry(entry: CacheEntry): PersistedCacheEntry {
@@ -269,6 +307,88 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
   constructor(storage: Storage, options: { key?: string } = {}) {
     if (!storage) {
       throw new Error(
-        'LocalStorageCachePersistenceAdapter requires a valid Storage o
+        'LocalStorageCachePersistenceAdapter requires a valid Storage instance',
+      );
+    }
 
-/* … truncated 2099 chars — edit only what you need near the top … */
+    this.storage = storage;
+    this.storageKey = options.key ?? DEFAULT_CACHE_NAMESPACE;
+    this.keysIndexKey = `${this.storageKey}:keys`;
+  }
+
+  async readAll(): Promise<PersistedCacheEntry[]> {
+    const keys = this.readKeys();
+    const entries: PersistedCacheEntry[] = [];
+
+    for (const key of keys) {
+      const raw = this.storage.getItem(this.entryKey(key));
+      if (raw === null) {
+        continue;
+      }
+
+      try {
+        entries.push(JSON.parse(raw) as PersistedCacheEntry);
+      } catch {
+        // Ignore malformed entries and drop them from the index.
+        this.removeKeyFromIndex(key);
+      }
+    }
+
+    return entries;
+  }
+
+  async write(entry: PersistedCacheEntry): Promise<void> {
+    this.storage.setItem(this.entryKey(entry.key), JSON.stringify(entry));
+    this.addKeyToIndex(entry.key);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.storage.removeItem(this.entryKey(key));
+    this.removeKeyFromIndex(key);
+  }
+
+  async clear(): Promise<void> {
+    for (const key of this.readKeys()) {
+      this.storage.removeItem(this.entryKey(key));
+    }
+    this.storage.removeItem(this.keysIndexKey);
+  }
+
+  private entryKey(key: string): string {
+    return `${this.storageKey}:${key}`;
+  }
+
+  private readKeys(): string[] {
+    const raw = this.storage.getItem(this.keysIndexKey);
+    if (raw === null) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private writeKeys(keys: string[]): void {
+    this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
+  }
+
+  private addKeyToIndex(key: string): void {
+    const keys = this.readKeys();
+    if (!keys.includes(key)) {
+      keys.push(key);
+      this.writeKeys(keys);
+    }
+  }
+
+  private removeKeyFromIndex(key: string): void {
+    const keys = this.readKeys();
+    const next = keys.filter((existing) => existing !== key);
+    if (next.length !== keys.length) {
+      this.writeKeys(next);
+    }
+  }
+}
