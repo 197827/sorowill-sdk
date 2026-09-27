@@ -96,6 +96,16 @@ export class ReadCache {
   private readonly now: () => number;
   private readonly persistence: CachePersistenceAdapter | undefined;
   private readonly readyPromise: Promise<void>;
+  /**
+   * Keys written or deleted after construction but before hydration completes.
+   * Hydration must not overwrite these with older persisted values.
+   */
+  private readonly touchedKeys = new Set<string>();
+  /**
+   * Set when clear() is called before hydration completes. Hydration must not
+   * repopulate the cache once it resolves.
+   */
+  private clearedBeforeHydration = false;
 
   constructor(options: ReadCacheOptions = {}) {
     this.ttlMs = options.ttlMs ?? 60_000;
@@ -135,6 +145,7 @@ export class ReadCache {
 
   set(key: string, value: unknown, willIds: Iterable<string> = []): void {
     if (this.ttlMs === 0) {
+      this.touchedKeys.add(key);
       void this.persistence?.delete(key);
       return;
     }
@@ -146,6 +157,7 @@ export class ReadCache {
       willIds: new Set(willIds),
     };
 
+    this.touchedKeys.add(key);
     this.entries.set(key, entry);
     void this.persistence
       ?.write(this.toPersistedEntry(entry))
@@ -169,6 +181,7 @@ export class ReadCache {
   }
 
   clear(): void {
+    this.clearedBeforeHydration = true;
     this.entries.clear();
     void this.persistence?.clear().catch(() => {
       // Silently ignore persistence failures to prevent unhandled rejections
@@ -177,6 +190,7 @@ export class ReadCache {
   }
 
   private async delete(key: string): Promise<void> {
+    this.touchedKeys.add(key);
     this.entries.delete(key);
     await this.persistence?.delete(key);
   }
@@ -187,11 +201,24 @@ export class ReadCache {
     }
 
     const persistedEntries = await this.persistence.readAll();
+
+    // If clear() was called while hydration was in flight, the cache must
+    // remain empty once ready() resolves. Do not repopulate it.
+    if (this.clearedBeforeHydration) {
+      return;
+    }
+
     const now = this.now();
 
     for (const persistedEntry of persistedEntries) {
       if (persistedEntry.expiresAt !== null && persistedEntry.expiresAt <= now) {
         await this.persistence.delete(persistedEntry.key);
+        continue;
+      }
+
+      // Never let an older persisted entry replace a value that was written
+      // (or deleted) after construction but before hydration completed.
+      if (this.touchedKeys.has(persistedEntry.key)) {
         continue;
       }
 
@@ -270,17 +297,14 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
       }
       return entries;
     } catch {
-      this.storage.removeItem(this.keysIndexKey);
       return [];
     }
   }
 
   async write(entry: PersistedCacheEntry): Promise<void> {
     this.storage.setItem(`${this.storageKey}:${entry.key}`, JSON.stringify(entry));
-
     const keysJson = this.storage.getItem(this.keysIndexKey);
     const keys = keysJson ? (JSON.parse(keysJson) as string[]) : [];
-
     if (!keys.includes(entry.key)) {
       keys.push(entry.key);
       this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
@@ -289,15 +313,10 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
 
   async delete(key: string): Promise<void> {
     this.storage.removeItem(`${this.storageKey}:${key}`);
-
     const keysJson = this.storage.getItem(this.keysIndexKey);
     if (keysJson) {
       const keys = (JSON.parse(keysJson) as string[]).filter((k) => k !== key);
-      if (keys.length > 0) {
-        this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
-      } else {
-        this.storage.removeItem(this.keysIndexKey);
-      }
+      this.storage.setItem(this.keysIndexKey, JSON.stringify(keys));
     }
   }
 
@@ -308,85 +327,7 @@ export class LocalStorageCachePersistenceAdapter implements CachePersistenceAdap
       for (const key of keys) {
         this.storage.removeItem(`${this.storageKey}:${key}`);
       }
-      this.storage.removeItem(this.keysIndexKey);
     }
-  }
-}
-
-/**
- * IndexedDB-backed cache persistence adapter.
- *
- * The IndexedDB connection is opened lazily on first access (readAll, write, delete, or clear),
- * not in the constructor. This allows code to instantiate the adapter without side effects,
- * such as while deciding between IndexedDB and LocalStorage fallback strategies.
- *
- * If the connection attempt fails, the error is thrown at first use and will not be retried;
- * calling any method again on the same instance will attempt to open again, but since the
- * failure state is not tracked, repeated failures are possible.
- */
-export class IndexedDbCachePersistenceAdapter implements CachePersistenceAdapter {
-  private readonly dbName: string;
-  private readonly storeName: string;
-  private dbPromise: Promise<IDBDatabase> | undefined;
-
-  constructor(options: { dbName?: string; storeName?: string } = {}) {
-    this.dbName = options.dbName ?? 'sorowill-sdk';
-    this.storeName = options.storeName ?? 'read-cache';
-  }
-
-  async readAll(): Promise<PersistedCacheEntry[]> {
-    const store = await this.getStore('readonly');
-    return await this.request<PersistedCacheEntry[]>(store.getAll());
-  }
-
-  async write(entry: PersistedCacheEntry): Promise<void> {
-    const store = await this.getStore('readwrite');
-    await this.request(store.put(entry));
-  }
-
-  async delete(key: string): Promise<void> {
-    const store = await this.getStore('readwrite');
-    await this.request(store.delete(key));
-  }
-
-  async clear(): Promise<void> {
-    const store = await this.getStore('readwrite');
-    await this.request(store.clear());
-  }
-
-  private getDbPromise(): Promise<IDBDatabase> {
-    if (!this.dbPromise) {
-      this.dbPromise = this.open();
-    }
-    return this.dbPromise;
-  }
-
-  private async open(): Promise<IDBDatabase> {
-    const request = indexedDB.open(this.dbName, 1);
-
-    return await new Promise<IDBDatabase>((resolve, reject) => {
-      request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
-      request.onblocked = () => reject(new Error('IndexedDB open blocked by another connection'));
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(this.storeName)) {
-          db.createObjectStore(this.storeName, { keyPath: 'key' });
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-    });
-  }
-
-  private async getStore(mode: IDBTransactionMode): Promise<IDBObjectStore> {
-    const db = await this.getDbPromise();
-    const transaction = db.transaction(this.storeName, mode);
-    return transaction.objectStore(this.storeName);
-  }
-
-  private async request<T>(request: IDBRequest<T>): Promise<T> {
-    return await new Promise<T>((resolve, reject) => {
-      request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
-      request.onsuccess = () => resolve(request.result);
-    });
+    this.storage.removeItem(this.keysIndexKey);
   }
 }
