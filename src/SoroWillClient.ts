@@ -61,7 +61,7 @@ import {
   WalletNetworkMismatchError,
   WebSocketNotConfiguredError,
 } from './errors';
-import { MAX_GUARDIANS, validateBeneficiaries } from './utils';
+import { hasDuplicateBeneficiaries, MAX_GUARDIANS, validateBeneficiaries } from './utils';
 import { RequestQueue } from './requestQueue';
 import { InFlightTracker } from './inFlightTracker';
 import { RpcEndpointPool } from './rpc';
@@ -817,6 +817,9 @@ export class SoroWillClient {
     params: CreateWillParams,
     options?: RequestOptions,
   ): Promise<{ willId: string; txHash: string }> {
+    if (hasDuplicateBeneficiaries(params.beneficiaries)) {
+      throw new BeneficiaryValidationError('Invalid beneficiaries: duplicate beneficiary addresses are not allowed.');
+    }
     if (!validateBeneficiaries(params.beneficiaries)) {
       throw new BeneficiaryValidationError(
         'Invalid beneficiaries: list must be 1–10 entries, every percentage must be a positive integer, and percentages must sum to exactly 100.',
@@ -982,6 +985,9 @@ export class SoroWillClient {
     options?: RequestOptions,
   ): Promise<{ txHash: string }> {
     parseWillId(params.willId);
+    if (hasDuplicateBeneficiaries(params.beneficiaries)) {
+      throw new BeneficiaryValidationError('Invalid beneficiaries: duplicate beneficiary addresses are not allowed.');
+    }
     if (!validateBeneficiaries(params.beneficiaries)) {
       throw new BeneficiaryValidationError(
         'Invalid beneficiaries: list must be 1–10 entries, every percentage must be a positive integer, and percentages must sum to exactly 100.',
@@ -1099,7 +1105,8 @@ export class SoroWillClient {
   }
 
   async getWill(willId: string, options?: RequestOptions): Promise<Will> {
-    const cacheKey = createReadCacheKey('get_will', { willId });
+    const canonicalWillId = parseWillId(willId).toString();
+    const cacheKey = createReadCacheKey('get_will', { willId: canonicalWillId });
     if (this.readCache) {
       await this.readCache.ready();
       const cached = this.readCache.get<Will>(cacheKey);
@@ -1107,9 +1114,9 @@ export class SoroWillClient {
         return cloneWill(cached);
       }
     }
-    const raw = await this.read<unknown>('get_will', { will_id: parseWillId(willId) }, options);
+    const raw = await this.read<unknown>('get_will', { will_id: BigInt(canonicalWillId) }, options);
     const will = mapWill(raw);
-    this.readCache?.set(cacheKey, cloneWill(will), [willId]);
+    this.readCache?.set(cacheKey, cloneWill(will), [canonicalWillId]);
     return will;
   }
 

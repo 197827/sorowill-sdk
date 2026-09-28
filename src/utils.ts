@@ -89,7 +89,7 @@ export function isCheckinDue(will: Will): boolean {
  *
  * This function mirrors the Rust contract's `distribute()` function in the
  * SoroWill contracts repository:
- * https://github.com/SoroWill/sorowill-contracts/blob/main/contracts/sorowill/src/contract.rs
+ * https://github.com/SoroWill/sorowill-contracts/blob/main/contracts/will/src/lib.rs
  * (see `fn distribute` — integer division with remainder assigned to the
  * last beneficiary). Keep this implementation in sync with any changes to
  * that contract function.
@@ -144,7 +144,7 @@ export function formatDeadline(date: Date): string {
  * Maximum number of beneficiaries the SoroWill contract allows per will.
  *
  * **IMPORTANT**: This value mirrors the `MAX_BENEFICIARIES` constant in the
- * contract's `errors.rs` and must be kept in sync manually until the
+ * contract's `contracts/will/src/lib.rs` and must be kept in sync manually until the
  * contracts repo ships automated spec-drift tooling (issue #122).
  */
 export const MAX_BENEFICIARIES = 10;
@@ -153,15 +153,16 @@ export const MAX_BENEFICIARIES = 10;
  * Maximum number of guardians the SoroWill contract allows per will.
  *
  * **IMPORTANT**: This value mirrors the `MAX_GUARDIANS` constant in the
- * contract's `errors.rs` and must be kept in sync manually until the
+ * contract's `contracts/will/src/lib.rs` and must be kept in sync manually until the
  * contracts repo ships automated spec-drift tooling (issue #122).
  */
 export const MAX_GUARDIANS = 3;
 
 /**
  * Validates that a beneficiary list is well-formed: non-empty, at most
- * {@link MAX_BENEFICIARIES} entries, every percentage is a positive
- * integer, and percentages sum to exactly 100.
+ * {@link MAX_BENEFICIARIES} entries, no duplicate addresses (compared
+ * case-insensitively), every percentage is a positive integer, and
+ * percentages sum to exactly 100.
  *
  * Percentages are on the SDK's 0-100 scale. `SoroWillClient` scales them to
  * the contract's basis points (summing to 10,000) when it submits a
@@ -174,11 +175,24 @@ export function validateBeneficiaries(beneficiaries: Beneficiary[]): boolean {
   if (!beneficiaries.every((b) => StrKey.isValidEd25519PublicKey(b.address))) {
     return false;
   }
+  if (hasDuplicateBeneficiaries(beneficiaries)) {
+    return false;
+  }
   if (!beneficiaries.every((b) => Number.isInteger(b.percentage) && b.percentage > 0)) {
     return false;
   }
   const sum = beneficiaries.reduce((acc, b) => acc + b.percentage, 0);
   return sum === 100;
+}
+
+/**
+ * Returns whether two or more entries in `beneficiaries` share the same
+ * address (compared case-insensitively), which the contract rejects with
+ * `WillError::DuplicateBeneficiary`.
+ */
+export function hasDuplicateBeneficiaries(beneficiaries: Beneficiary[]): boolean {
+  const addresses = new Set(beneficiaries.map((b) => b.address.toUpperCase()));
+  return addresses.size !== beneficiaries.length;
 }
 
 /** Returns whether `address` is one of `will`'s guardians. */

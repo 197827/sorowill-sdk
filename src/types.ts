@@ -5,7 +5,7 @@
  * **IMPORTANT**: These values must be kept in sync manually with the
  * contract repo until the spec-drift tooling proposed there exists.
  *
- * @see {@link https://github.com/SoroWill/sorowill-contracts/blob/main/src/errors.rs}
+ * @see {@link https://github.com/SoroWill/sorowill-contracts/blob/main/contracts/will/src/errors.rs}
  */
 export enum WillErrorCode {
   /** The will was not found. */
