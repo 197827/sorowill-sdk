@@ -209,3 +209,10 @@ export {
   validateGuardians,
 } from './utils';
 export type { NextActionableState } from './utils';
+
+export {
+  DEFAULT_NETWORK,
+  getDefaultContractId,
+  resolveSoroWillConfig,
+} from './config';
+export type { SoroWillConfig, SoroWillConfigInput } from './config';

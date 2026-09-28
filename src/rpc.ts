@@ -63,6 +63,41 @@ export function isRetryableRpcConnectionError(error: unknown): boolean {
 }
 
 /**
+ * Detects whether an error is specifically a timeout (as opposed to a generic
+ * connection failure). Timeout errors are retried with exponential backoff
+ * because a slow-but-healthy RPC endpoint may simply need more time, whereas
+ * other connection errors are handled by endpoint failover.
+ */
+export function isRpcTimeoutError(error: unknown): boolean {
+  const TIMEOUT_FRAGMENTS = ['timeout', 'timed out', 'etimedout', 'deadline exceeded'];
+
+  const matches = (text: string): boolean => {
+    const lower = text.toLowerCase();
+    return TIMEOUT_FRAGMENTS.some((fragment) => lower.includes(fragment));
+  };
+
+  if (error instanceof Error) {
+    return matches(error.message) || matches(error.name);
+  }
+
+  if (typeof error === 'string') {
+    return matches(error);
+  }
+
+  if (typeof error === 'object' && error !== null) {
+    const obj = error as Record<string, unknown>;
+    if (typeof obj['message'] === 'string' && matches(obj['message'])) {
+      return true;
+    }
+    if (typeof obj['name'] === 'string' && matches(obj['name'])) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Milliseconds to wait after a failover before opportunistically retrying
  * the originally preferred (first-listed) RPC endpoint again. Without this,
  * a single transient blip on the primary endpoint would pin the pool to
@@ -107,6 +142,9 @@ export class RpcEndpointPool {
   private readonly servers: SoroWillRpcServer[];
   private readonly rpcUrls: string[];
   private readonly failoverCooldownMs: number;
+  private readonly timeoutMs: number;
+  private readonly timeoutMaxAttempts: number;
+  private readonly timeoutRetryBaseDelayMs: number;
   private activeIndex = 0;
   private lastFailoverAt: number | null = null;
 
@@ -118,11 +156,20 @@ export class RpcEndpointPool {
    * @param failoverCooldownMs - How long to keep using a backup endpoint
    * after a failover before opportunistically retrying the primary
    * (first-listed) endpoint again. Defaults to {@link DEFAULT_FAILOVER_COOLDOWN_MS}.
+   * @param timeoutMs - Per-request RPC timeout in milliseconds. Defaults to
+   * {@link DEFAULT_RPC_TIMEOUT_MS} (30s).
+   * @param timeoutMaxAttempts - Maximum attempts (initial try + retries) for
+   * timeout errors. Defaults to {@link DEFAULT_RPC_TIMEOUT_MAX_ATTEMPTS}.
+   * @param timeoutRetryBaseDelayMs - Base delay for exponential backoff on
+   * timeout errors. Defaults to {@link DEFAULT_RPC_TIMEOUT_RETRY_BASE_DELAY_MS}.
    */
   constructor(
     rpcUrls: readonly string[],
     serverOverride?: SoroWillRpcServer,
     failoverCooldownMs: number = DEFAULT_FAILOVER_COOLDOWN_MS,
+    timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS,
+    timeoutMaxAttempts: number = DEFAULT_RPC_TIMEOUT_MAX_ATTEMPTS,
+    timeoutRetryBaseDelayMs: number = DEFAULT_RPC_TIMEOUT_RETRY_BASE_DELAY_MS,
   ) {
     const normalizedRpcUrls = rpcUrls
       .map((rpcUrl) => rpcUrl.trim())
@@ -143,10 +190,17 @@ export class RpcEndpointPool {
 
     this.rpcUrls = uniqueRpcUrls;
     this.failoverCooldownMs = failoverCooldownMs;
+    this.timeoutMs = timeoutMs;
+    this.timeoutMaxAttempts = Math.max(1, timeoutMaxAttempts);
+    this.timeoutRetryBaseDelayMs = timeoutRetryBaseDelayMs;
     this.servers = serverOverride
       ? uniqueRpcUrls.map(() => serverOverride)
       : uniqueRpcUrls.map(
-          (rpcUrl) => new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') }),
+          (rpcUrl) =>
+            new rpc.Server(rpcUrl, {
+              allowHttp: rpcUrl.startsWith('http://'),
+              timeout: timeoutMs,
+            }),
         );
   }
 
@@ -166,6 +220,34 @@ export class RpcEndpointPool {
     }
   }
 
+  /**
+   * Runs `operation` against the active endpoint, retrying timeout errors with
+   * exponential backoff before falling back to the next endpoint. Non-timeout
+   * connection errors skip straight to failover.
+   */
+  private async runWithTimeoutRetry<T>(
+    operation: (server: SoroWillRpcServer, rpcUrl: string) => Promise<T>,
+    server: SoroWillRpcServer,
+    rpcUrl: string,
+  ): Promise<T> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < this.timeoutMaxAttempts; attempt += 1) {
+      try {
+        return await operation(server, rpcUrl);
+      } catch (error) {
+        lastError = error;
+        const isLastAttempt = attempt === this.timeoutMaxAttempts - 1;
+        if (!isRpcTimeoutError(error) || isLastAttempt) {
+          throw error;
+        }
+        await sleep(this.timeoutRetryBaseDelayMs * 2 ** attempt);
+      }
+    }
+
+    throw lastError ?? new Error('RPC timeout retries exhausted');
+  }
+
   async withFailover<T>(operation: (server: SoroWillRpcServer, rpcUrl: string) => Promise<T>): Promise<T> {
     this.maybeRepromotePrimaryEndpoint();
     let lastError: unknown;
@@ -180,7 +262,7 @@ export class RpcEndpointPool {
       }
 
       try {
-        return await operation(server, rpcUrl);
+        return await this.runWithTimeoutRetry(operation, server, rpcUrl);
       } catch (error) {
         lastError = error;
         if (!isRetryableRpcConnectionError(error) || attempt === this.servers.length - 1) {
