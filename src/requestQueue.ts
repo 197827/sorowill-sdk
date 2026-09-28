@@ -70,20 +70,17 @@ export class RequestQueue {
       return Promise.reject(signal.reason);
     }
     return new Promise<T>((resolve, reject) => {
-      let abortListener: (() => void) | undefined;
+      const request: PendingRequest<T> = { run, resolve, reject, timeoutMs, signal, abortListener: undefined, priority, enqueuedAt: Date.now() };
       if (signal) {
-        abortListener = () => {
+        request.abortListener = () => {
+          // Drop the request from the queue so an aborted request never runs.
+          const index = this.pending.indexOf(request as PendingRequest<unknown>);
+          if (index !== -1) this.pending.splice(index, 1);
+          this.removeAbortListener(request);
           reject(signal.reason);
-          removeAbortListener();
         };
-        signal.addEventListener('abort', abortListener);
+        signal.addEventListener('abort', request.abortListener);
       }
-      const removeAbortListener = () => {
-        if (signal && abortListener) {
-          signal.removeEventListener('abort', abortListener);
-        }
-      };
-      const request: PendingRequest<T> = { run, resolve, reject, timeoutMs, signal, abortListener, priority, enqueuedAt: Date.now() };
       this.pending.push(request as PendingRequest<unknown>);
       this.drain();
     });
