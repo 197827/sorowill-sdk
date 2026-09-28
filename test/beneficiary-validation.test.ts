@@ -5,7 +5,7 @@ const { freighterApiMock, mockState } = vi.hoisted(() => ({
   freighterApiMock: {
     getAddress: vi.fn(async () => ({ address: 'GTESTACCOUNT', error: undefined })),
     requestAccess: vi.fn(),
-    getNetworkDetails: vi.fn(),
+    getNetworkDetails: vi.fn().mockResolvedValue({ network: 'TESTNET', networkPassphrase: 'TESTNET' }),
     isConnected: vi.fn(),
     signTransaction: vi.fn(),
   },
@@ -144,7 +144,7 @@ function makeClient() {
 
 describe('Freighter wallet adapter', () => {
   it('returns empty network details when Freighter does not provide them', async () => {
-    freighterApiMock.getNetworkDetails.mockResolvedValue(undefined);
+    freighterApiMock.getNetworkDetails.mockResolvedValueOnce(undefined);
 
     const adapter = new FreighterWalletAdapter();
     await expect(adapter.getNetwork()).resolves.toEqual({

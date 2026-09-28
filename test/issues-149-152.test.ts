@@ -39,7 +39,7 @@ vi.mock('@stellar/freighter-api', () => ({
   default: {
     getAddress: vi.fn(async () => ({ address: mockState.walletPublicKey, error: undefined })),
     requestAccess: vi.fn(),
-    getNetworkDetails: vi.fn(),
+    getNetworkDetails: vi.fn().mockResolvedValue({ network: 'TESTNET', networkPassphrase: 'Test SDF Network ; September 2015' }),
     isConnected: vi.fn(),
     signTransaction: vi.fn(async (xdr: string) => xdr),
   },
