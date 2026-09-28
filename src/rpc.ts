@@ -70,6 +70,39 @@ export function isRetryableRpcConnectionError(error: unknown): boolean {
  */
 const DEFAULT_FAILOVER_COOLDOWN_MS = 60_000;
 
+/**
+ * Terminal transaction statuses reported by `getTransaction`. A transaction
+ * in any of these states has already been resolved on-chain, so a fee-bump
+ * must NOT be submitted for it (doing so risks a duplicate operation).
+ */
+const TERMINAL_TRANSACTION_STATUSES = new Set(['SUCCESS', 'FAILED']);
+
+/**
+ * Queries the network for the current status of a submitted transaction.
+ *
+ * Returns `true` when the transaction has reached a terminal state
+ * (`SUCCESS` or `FAILED`) and therefore must not be fee-bumped, and `false`
+ * when it is still pending (e.g. `NOT_FOUND`) or its status cannot be
+ * determined. Callers that gate a fee-bump on this result should treat an
+ * indeterminate status as "still pending" so a genuinely stuck transaction
+ * is not left unbumped.
+ */
+export async function isTransactionResolved(
+  server: SoroWillRpcServer,
+  transactionHash: string,
+): Promise<boolean> {
+  try {
+    const response = await server.getTransaction(transactionHash);
+    const status = (response as { status?: unknown }).status;
+    return typeof status === 'string' && TERMINAL_TRANSACTION_STATUSES.has(status);
+  } catch {
+    // A lookup failure (e.g. the transaction is not yet indexed) means we
+    // cannot confirm resolution, so report it as unresolved and allow the
+    // caller to proceed with the bump.
+    return false;
+  }
+}
+
 export class RpcEndpointPool {
   private readonly servers: SoroWillRpcServer[];
   private readonly rpcUrls: string[];

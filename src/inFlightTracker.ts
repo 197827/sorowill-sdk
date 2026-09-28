@@ -47,6 +47,28 @@ export class InFlightTracker {
     return entry.promise;
   }
 
+  /**
+   * Runs `operation` only if no operation is currently in flight for the given
+   * will/method pair. Unlike {@link track}, this is intended for timeout-driven
+   * follow-up work (e.g. auto fee-bump) where the caller must first confirm the
+   * original operation is still pending before acting. If the original operation
+   * has already settled (success or failure), the in-flight entry is gone and the
+   * guard prevents a duplicate submission.
+   */
+  trackIfPending<T>(
+    willId: string | bigint,
+    method: string,
+    operation: (signal: AbortSignal) => PromiseLike<T>,
+  ): PromiseLike<T> | undefined {
+    const key = this.getKey(willId, method);
+
+    if (!this.inFlight.has(key)) {
+      return undefined;
+    }
+
+    return this.track(willId, method, operation);
+  }
+
   clear(): void {
     for (const { controller } of this.inFlight.values()) {
       controller.abort();

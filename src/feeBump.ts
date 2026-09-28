@@ -164,6 +164,27 @@ function xdrToString(value: unknown): string {
 }
 
 /**
+ * Query the network for the current status of a transaction by hash.
+ *
+ * Returns the RPC transaction status (`SUCCESS`, `FAILED`, or `NOT_FOUND`).
+ * Used to avoid submitting a fee-bump for a transaction that has already
+ * been included in a ledger.
+ */
+export async function getTransactionStatus(options: {
+  network: SoroWillNetwork;
+  hash: string;
+}): Promise<rpc.Api.GetTransactionStatus> {
+  const config = NETWORK_CONFIG[options.network];
+  const rpcUrl = config.rpcUrls[0]!;
+  const server = new rpc.Server(rpcUrl, {
+    allowHttp: rpcUrl.startsWith('http://'),
+  });
+
+  const response = await server.getTransaction(options.hash);
+  return response.status;
+}
+
+/**
  * Submit a signed fee-bump transaction to the network and wait for confirmation.
  */
 export async function submitFeeBumpTransaction(
@@ -273,4 +294,117 @@ export async function submitFeeBump(options: {
   }
 
   return submitFeeBumpTransaction(submitOptions);
+}
+
+/** Options for the auto fee-bump-on-timeout helper. */
+export interface AutoFeeBumpOnTimeoutOptions {
+  /** The network to use. */
+  network: SoroWillNetwork;
+  /** The base64-encoded XDR of the prepared inner transaction. */
+  innerTransactionXdr: string;
+  /** Secret key of the fee sponsor account. */
+  feeSourceSecretKey: string;
+  /** Milliseconds to wait for a response before attempting a fee bump. */
+  timeoutMs: number;
+  /** Optional explicit fee for the bump. Defaults to the inner transaction's fee. */
+  fee?: string;
+  /** Maximum number of attempts to poll for confirmation. Defaults to 30. */
+  pollAttempts?: number;
+}
+
+/**
+ * Submit a transaction and, if no response is received within `timeoutMs`,
+ * automatically submit a fee-bump version to speed up inclusion.
+ *
+ * Before submitting the bump, the original transaction's status is queried
+ * on-chain. The bump is only submitted when the original is still pending
+ * (i.e. not yet `SUCCESS` or `FAILED`), preventing a duplicate operation
+ * when the original merely reported slowly.
+ */
+export async function autoFeeBumpOnTimeout(
+  options: AutoFeeBumpOnTimeoutOptions,
+): Promise<{ txHash: string; createdAt: number; bumped: boolean }> {
+  const config = NETWORK_CONFIG[options.network];
+  const rpcUrl = config.rpcUrls[0]!;
+  const server = new rpc.Server(rpcUrl, {
+    allowHttp: rpcUrl.startsWith('http://'),
+  });
+
+  const innerTx = TransactionBuilder.fromXDR(
+    options.innerTransactionXdr,
+    config.networkPassphrase,
+  ) as Transaction;
+
+  const sendResponse = await server.sendTransaction(innerTx);
+  if (sendResponse.status === 'ERROR') {
+    const errorResponse = sendResponse as SendTransactionErrorResponse;
+    const diagnosticInfo = errorResponse.diagnosticEventsXdr ?
+      ` (diagnostics: ${errorResponse.diagnosticEventsXdr})` : '';
+    const errorDetail = errorResponse.errorResultXdr ?
+      ` (error: ${errorResponse.errorResultXdr})` : '';
+    throw new Error(
+      `Transaction submission failed${diagnosticInfo}${errorDetail}`,
+      { cause: sendResponse }
+    );
+  }
+
+  const originalHash = sendResponse.hash;
+
+  const timeoutResult = await new Promise<'confirmed' | 'timeout'>((resolve) => {
+    const timer = setTimeout(() => resolve('timeout'), options.timeoutMs);
+    server
+      .pollTransaction(originalHash, { attempts: 1 })
+      .then((txResponse) => {
+        if (txResponse.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+          clearTimeout(timer);
+          resolve('confirmed');
+        }
+      })
+      .catch(() => {
+        /* keep waiting until the timeout fires */
+      });
+  });
+
+  if (timeoutResult === 'confirmed') {
+    const confirmed = await server.getTransaction(originalHash);
+    return {
+      txHash: originalHash,
+      createdAt: confirmed.createdAt,
+      bumped: false,
+    };
+  }
+
+  // Timeout elapsed: re-check the original transaction status before bumping.
+  const statusResponse = await server.getTransaction(originalHash);
+  if (statusResponse.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+    return {
+      txHash: originalHash,
+      createdAt: statusResponse.createdAt,
+      bumped: false,
+    };
+  }
+  if (statusResponse.status === rpc.Api.GetTransactionStatus.FAILED) {
+    throw new Error(
+      `Transaction failed before fee bump: ${originalHash}`,
+      { cause: statusResponse },
+    );
+  }
+
+  // Original is still pending (NOT_FOUND): safe to submit the fee bump.
+  const bumpOptions: {
+    innerTransactionXdr: string;
+    feeSourceSecretKey: string;
+    network: SoroWillNetwork;
+    fee?: string;
+    pollAttempts?: number;
+  } = {
+    innerTransactionXdr: options.innerTransactionXdr,
+    feeSourceSecretKey: options.feeSourceSecretKey,
+    network: options.network,
+  };
+  if (options.fee !== undefined) bumpOptions.fee = options.fee;
+  if (options.pollAttempts !== undefined) bumpOptions.pollAttempts = options.pollAttempts;
+
+  const bumped = await submitFeeBump(bumpOptions);
+  return { txHash: bumped.txHash, createdAt: bumped.createdAt, bumped: true };
 }

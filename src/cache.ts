@@ -201,6 +201,20 @@ export class ReadCache {
     this.evictIfNeeded();
   }
 
+  /**
+   * Removes a single entry from the cache (both in-memory and persisted).
+   *
+   * Useful when a caller knows the cached value is stale and wants to force a
+   * subsequent `get()` to miss so the value is re-fetched from the source of
+   * truth (e.g. the contract).
+   *
+   * @param key - The cache key to evict
+   */
+  async invalidate(key: string): Promise<void> {
+    await this.readyPromise;
+    await this.delete(key);
+  }
+
   async invalidateByWillId(willId: string): Promise<void> {
     await this.readyPromise;
 
