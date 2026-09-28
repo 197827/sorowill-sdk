@@ -29,18 +29,17 @@ export const SOROBAN_LEDGER_CLOSE_TIME_MS = 5_000;
  * human-readable decimal string with thousands separators, e.g.
  * `formatUSDC(12345000000n) === "1,234.50"`.
  *
- * `decimals` is the token's on-chain decimal precision and defaults to
- * {@link USDC_DECIMALS} (6). Pass the token's actual `decimals` when it is
- * not 6 (e.g. 7 for classic Stellar asset precision) so the displayed
- * amount is scaled correctly instead of assuming a hardcoded 6.
+ * The result always has exactly two fractional digits. Sub-cent amounts are
+ * rounded half up (away from zero for negative values), so
+ * `formatUSDC(19_990_000n) === "2.00"` and `formatUSDC(19_949_999n) === "1.99"`.
  */
 export function formatUSDC(stroops: bigint, decimals = USDC_DECIMALS): string {
   const negative = stroops < 0n;
   const absolute = negative ? -stroops : stroops;
   const base = 10n ** BigInt(decimals);
-  const whole = absolute / base;
-  const fraction = absolute % base;
-  const cents = fraction / 10n ** BigInt(Math.max(decimals - 2, 0));
+  const totalCents = (absolute * 100n + base / 2n) / base;
+  const whole = totalCents / 100n;
+  const cents = totalCents % 100n;
 
   const wholeFormatted = whole.toLocaleString('en-US');
   const centsFormatted = cents.toString().padStart(2, '0');
@@ -98,9 +97,11 @@ export function toStroops(usdc: string, decimals = USDC_DECIMALS): bigint {
     throw new Error(`Invalid USDC amount: "${usdc}"`);
   }
 
-  const negative = expanded.startsWith('-');
-  const unsigned = negative ? expanded.slice(1) : expanded;
-  const [wholePart = '', fractionPart = ''] = unsigned.split('.');
+  const negative = cleaned.startsWith('-');
+  const unsigned = negative ? cleaned.slice(1) : cleaned;
+  const [wholePart = '', rawFraction = ''] = unsigned.split('.');
+  // Trailing zeros carry no precision, so "1.50" is valid even for 1-decimal tokens.
+  const fractionPart = rawFraction.replace(/0+$/, '');
   if (fractionPart.length > decimals) {
     throw new Error(
       `Invalid USDC amount: "${usdc}" has more than ${decimals} fractional digits, which would silently lose precision.`,
@@ -138,7 +139,7 @@ export function isCheckinDue(will: Will): boolean {
  *
  * This function mirrors the Rust contract's `distribute()` function in the
  * SoroWill contracts repository:
- * https://github.com/SoroWill/sorowill-contracts/blob/main/contracts/sorowill/src/contract.rs
+ * https://github.com/SoroWill/sorowill-contracts/blob/main/contracts/will/src/lib.rs
  * (see `fn distribute` — integer division with remainder assigned to the
  * last beneficiary). Keep this implementation in sync with any changes to
  * that contract function.
@@ -193,7 +194,7 @@ export function formatDeadline(date: Date): string {
  * Maximum number of beneficiaries the SoroWill contract allows per will.
  *
  * **IMPORTANT**: This value mirrors the `MAX_BENEFICIARIES` constant in the
- * contract's `errors.rs` and must be kept in sync manually until the
+ * contract's `contracts/will/src/lib.rs` and must be kept in sync manually until the
  * contracts repo ships automated spec-drift tooling (issue #122).
  */
 export const MAX_BENEFICIARIES = 10;
@@ -202,15 +203,16 @@ export const MAX_BENEFICIARIES = 10;
  * Maximum number of guardians the SoroWill contract allows per will.
  *
  * **IMPORTANT**: This value mirrors the `MAX_GUARDIANS` constant in the
- * contract's `errors.rs` and must be kept in sync manually until the
+ * contract's `contracts/will/src/lib.rs` and must be kept in sync manually until the
  * contracts repo ships automated spec-drift tooling (issue #122).
  */
 export const MAX_GUARDIANS = 3;
 
 /**
  * Validates that a beneficiary list is well-formed: non-empty, at most
- * {@link MAX_BENEFICIARIES} entries, every percentage is a positive
- * integer, and percentages sum to exactly 100.
+ * {@link MAX_BENEFICIARIES} entries, no duplicate addresses (compared
+ * case-insensitively), every percentage is a positive integer, and
+ * percentages sum to exactly 100.
  *
  * Percentages are on the SDK's 0-100 scale. `SoroWillClient` scales them to
  * the contract's basis points (summing to 10,000) when it submits a
@@ -223,6 +225,136 @@ export function validateBeneficiaries(beneficiaries: Beneficiary[]): boolean {
   if (!beneficiaries.every((b) => StrKey.isValidEd25519PublicKey(b.address))) {
     return false;
   }
-  if (!beneficiaries.every((b) => Number.isInteger(b.percent
+  if (hasDuplicateBeneficiaries(beneficiaries)) {
+    return false;
+  }
+  if (!beneficiaries.every((b) => Number.isInteger(b.percentage) && b.percentage > 0)) {
+    return false;
+  }
+  const sum = beneficiaries.reduce((acc, b) => acc + b.percentage, 0);
+  return sum === 100;
+}
 
-/* … truncated 1388 chars — edit only what you need near the top … */
+/**
+ * Returns whether two or more entries in `beneficiaries` share the same
+ * address (compared case-insensitively), which the contract rejects with
+ * `WillError::DuplicateBeneficiary`.
+ */
+export function hasDuplicateBeneficiaries(beneficiaries: Beneficiary[]): boolean {
+  const addresses = new Set(beneficiaries.map((b) => b.address.toUpperCase()));
+  return addresses.size !== beneficiaries.length;
+}
+
+/** Returns whether `address` is one of `will`'s guardians. */
+export function isGuardian(will: Will, address: string): boolean {
+  return will.guardians.includes(address);
+}
+
+/** Returns whether `address` is one of `will`'s beneficiaries. */
+export function isBeneficiary(will: Will, address: string): boolean {
+  return will.beneficiaries.some((b) => b.address === address);
+}
+
+/**
+ * Describes what the wallet at `connectedAddress` can currently do for
+ * `will`, combining its status, owner, guardians, and beneficiaries with
+ * the check-in deadline. Intended to drive which action buttons a UI shows.
+ */
+export interface NextActionableState {
+  canCheckIn: boolean;
+  canTrigger: boolean;
+  canEmergencyCheckIn: boolean;
+  canRelease: boolean;
+  canCancel: boolean;
+  canGuardianVote: boolean;
+}
+
+export interface NextActionableStateOptions {
+  guardianAlreadyVoted?: boolean;
+}
+
+/**
+ * Computes {@link NextActionableState} for `will` from the perspective of
+ * `connectedAddress`. Only the owner may check in, cancel, or emergency
+ * check in; triggering and releasing are permissionless once their
+ * on-chain preconditions are met; and guardians may vote for an early
+ * release at any point before the will is released or cancelled.
+ *
+ * PendingConfirmation: the will exists but is not yet active, so no
+ * owner actions are available until it transitions to Active.
+ *
+ * Settled: the will is fully closed; no further actions are possible.
+ */
+export function getNextActionableState(
+  will: Will,
+  connectedAddress: string,
+  nowOrOptions: Date | NextActionableStateOptions = new Date(),
+): NextActionableState {
+  const now = nowOrOptions instanceof Date ? nowOrOptions : new Date();
+  const options: NextActionableStateOptions = nowOrOptions instanceof Date ? {} : nowOrOptions;
+
+  // Terminal / pre-active states with no available actions
+  if (
+    will.status === WillStatus.PendingConfirmation ||
+    will.status === WillStatus.Released ||
+    will.status === WillStatus.Cancelled ||
+    will.status === WillStatus.Settled
+  ) {
+    return {
+      canCheckIn: false,
+      canTrigger: false,
+      canEmergencyCheckIn: false,
+      canRelease: false,
+      canCancel: false,
+      canGuardianVote: false,
+    };
+  }
+
+  const isOwner = will.owner === connectedAddress;
+  const isWillGuardian = isGuardian(will, connectedAddress);
+
+  const graceDeadlineMs =
+    (will.triggerTime?.getTime() ?? 0) + will.gracePeriodDays * 86_400 * 1000;
+  const isGracePeriodExpired = will.triggerTime !== null && now.getTime() >= graceDeadlineMs;
+
+  return {
+    canCheckIn: isOwner && will.status === WillStatus.Active,
+    canTrigger: will.status === WillStatus.Active && isCheckinDue(will),
+    canEmergencyCheckIn: isOwner && will.status === WillStatus.Triggered && !isGracePeriodExpired,
+    canRelease: will.status === WillStatus.Triggered && isGracePeriodExpired,
+    canCancel: isOwner && will.status === WillStatus.Active,
+    canGuardianVote:
+      isWillGuardian &&
+      !options.guardianAlreadyVoted &&
+      (will.status === WillStatus.Active || will.status === WillStatus.Triggered),
+  };
+}
+/**
+ * Validates a guardian list: empty list is valid (guardians are optional),
+ * at most {@link MAX_GUARDIANS} entries, every address (including the
+ * optional `ownerAddress`) is a syntactically valid Stellar public key, no
+ * duplicate addresses, and no owner address in the list.
+ *
+ * @param guardians - The list of guardian addresses to validate.
+ * @param ownerAddress - Optional owner address; when supplied, the function
+ *                       rejects any guardian that matches it.
+ */
+export function validateGuardians(guardians: string[], ownerAddress?: string): boolean {
+  if (guardians.length > MAX_GUARDIANS) {
+    return false;
+  }
+  if (!guardians.every((address) => StrKey.isValidEd25519PublicKey(address))) {
+    return false;
+  }
+  if (ownerAddress !== undefined && !StrKey.isValidEd25519PublicKey(ownerAddress)) {
+    return false;
+  }
+  const unique = new Set(guardians);
+  if (unique.size !== guardians.length) {
+    return false;
+  }
+  if (ownerAddress !== undefined && unique.has(ownerAddress)) {
+    return false;
+  }
+  return true;
+}

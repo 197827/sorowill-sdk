@@ -35,12 +35,16 @@ export class InFlightTracker {
     }
 
     const controller = new AbortController();
-    const promise = Promise.resolve(operation(controller.signal)).finally(() => {
-      this.inFlight.delete(key);
+    const entry = { controller } as InFlightOperation<T>;
+    entry.promise = Promise.resolve(operation(controller.signal)).finally(() => {
+      // Only remove the entry this call created; a newer track() may own the key now.
+      if (this.inFlight.get(key) === entry) {
+        this.inFlight.delete(key);
+      }
     });
 
-    this.inFlight.set(key, { promise, controller });
-    return promise;
+    this.inFlight.set(key, entry as InFlightOperation<unknown>);
+    return entry.promise;
   }
 
   clear(): void {

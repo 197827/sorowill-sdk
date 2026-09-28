@@ -3,6 +3,7 @@ import {
   BASE_FEE,
   Contract,
   Networks,
+  StrKey,
   Transaction,
   TransactionBuilder,
   rpc,
@@ -42,6 +43,7 @@ import {
 import {
   AccountNotFundedError,
   BeneficiaryValidationError,
+  GuardianValidationError,
   InvalidDayCountError,
   InvalidContractIdError,
   InvalidCursorError,
@@ -49,6 +51,7 @@ import {
   InvokeFailedError,
   RequestTimeoutError,
   mapContractError,
+  RequestTimeoutError,
   SimulationError,
   SoroWillError,
   SoroWillInvalidAmountError,
@@ -58,7 +61,7 @@ import {
   WalletNetworkMismatchError,
   WebSocketNotConfiguredError,
 } from './errors';
-import { MAX_GUARDIANS, validateBeneficiaries } from './utils';
+import { hasDuplicateBeneficiaries, MAX_GUARDIANS, validateBeneficiaries } from './utils';
 import { RequestQueue } from './requestQueue';
 import { InFlightTracker } from './inFlightTracker';
 import { RpcEndpointPool } from './rpc';
@@ -134,6 +137,7 @@ export interface SoroWillRpcServer {
     options: { attempts: number },
   ): Promise<rpc.Api.GetTransactionResponse>;
   getFeeStats?(): Promise<rpc.Api.GetFeeStatsResponse>;
+  getHealth?(): Promise<rpc.Api.GetHealthResponse>;
 }
 
 interface ContractSpecLike {
@@ -814,6 +818,9 @@ export class SoroWillClient {
     params: CreateWillParams,
     options?: RequestOptions,
   ): Promise<{ willId: string; txHash: string }> {
+    if (hasDuplicateBeneficiaries(params.beneficiaries)) {
+      throw new BeneficiaryValidationError('Invalid beneficiaries: duplicate beneficiary addresses are not allowed.');
+    }
     if (!validateBeneficiaries(params.beneficiaries)) {
       throw new BeneficiaryValidationError(
         'Invalid beneficiaries: list must be 1–10 entries, every percentage must be a positive integer, and percentages must sum to exactly 100.',
@@ -823,7 +830,23 @@ export class SoroWillClient {
     if (params.guardians.length > MAX_GUARDIANS) {
       throw new TooManyGuardiansError(params.guardians.length, MAX_GUARDIANS);
     }
+    if (!StrKey.isValidContract(params.token)) {
+      throw new InvalidContractIdError(params.token);
+    }
     const owner = await this.getWalletPublicKey();
+    const seenGuardians = new Set<string>();
+    for (const guardian of params.guardians) {
+      if (!StrKey.isValidEd25519PublicKey(guardian)) {
+        throw new GuardianValidationError('invalid_address', guardian);
+      }
+      if (seenGuardians.has(guardian)) {
+        throw new GuardianValidationError('duplicate', guardian);
+      }
+      if (guardian === owner) {
+        throw new GuardianValidationError('owner_is_guardian', guardian);
+      }
+      seenGuardians.add(guardian);
+    }
     const { txHash, returnValue } = await this.invoke(
       'create_will',
       {
@@ -963,6 +986,9 @@ export class SoroWillClient {
     options?: RequestOptions,
   ): Promise<{ txHash: string }> {
     parseWillId(params.willId);
+    if (hasDuplicateBeneficiaries(params.beneficiaries)) {
+      throw new BeneficiaryValidationError('Invalid beneficiaries: duplicate beneficiary addresses are not allowed.');
+    }
     if (!validateBeneficiaries(params.beneficiaries)) {
       throw new BeneficiaryValidationError(
         'Invalid beneficiaries: list must be 1–10 entries, every percentage must be a positive integer, and percentages must sum to exactly 100.',
@@ -1042,20 +1068,24 @@ export class SoroWillClient {
    * Useful for showing a 'network unavailable' banner before attempting a real call.
    * Never throws — network failures resolve to `false` rather than propagating an exception.
    *
-   * @returns `true` if the RPC server is healthy and responding, `false` otherwise.
+   * The call goes through the request queue with the client's timeout and RPC failover.
+   * A server that does not implement `getHealth` is reported as not healthy (`false`).
+   *
+   * @returns `true` only if the RPC server reports `status: 'healthy'`, `false` otherwise.
    */
-  async isHealthy(): Promise<boolean> {
+  async isHealthy(options?: RequestOptions): Promise<boolean> {
     try {
-      // The underlying rpc.Server has a getHealth() method that calls the server's
-      // JSON-RPC getHealth endpoint. We cast to any because our SoroWillRpcServer
-      // interface doesn't include it, but it's available on rpc.Server instances.
-      const server = this.server as unknown as { getHealth(): Promise<unknown> };
-      if (typeof server.getHealth === 'function') {
-        await server.getHealth();
-        return true;
-      }
-      // If getHealth is not available (e.g., custom server implementation), assume healthy
-      return true;
+      const response = await this.rpc(
+        () =>
+          this.rpcPool.withFailover((server) => {
+            if (typeof server.getHealth !== 'function') {
+              throw new SoroWillError('The configured RPC server does not support getHealth');
+            }
+            return server.getHealth();
+          }),
+        options,
+      );
+      return response?.status === 'healthy';
     } catch {
       // Network failures, timeouts, or any other errors mean the server is not healthy
       return false;
@@ -1080,7 +1110,8 @@ export class SoroWillClient {
   }
 
   async getWill(willId: string, options?: RequestOptions): Promise<Will> {
-    const cacheKey = createReadCacheKey('get_will', { willId });
+    const canonicalWillId = parseWillId(willId).toString();
+    const cacheKey = createReadCacheKey('get_will', { willId: canonicalWillId });
     if (this.readCache) {
       await this.readCache.ready();
       const cached = this.readCache.get<Will>(cacheKey);
@@ -1088,9 +1119,9 @@ export class SoroWillClient {
         return cloneWill(cached);
       }
     }
-    const raw = await this.read<unknown>('get_will', { will_id: parseWillId(willId) }, options);
+    const raw = await this.read<unknown>('get_will', { will_id: BigInt(canonicalWillId) }, options);
     const will = mapWill(raw);
-    this.readCache?.set(cacheKey, cloneWill(will), [willId]);
+    this.readCache?.set(cacheKey, cloneWill(will), [canonicalWillId]);
     return will;
   }
 
@@ -1546,9 +1577,12 @@ export class SoroWillClient {
 
     const poll = async (): Promise<void> => {
       if (closed) return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
       try {
         const response = await this.fetchImpl(this.eventRpcUrl, {
           method: 'POST',
+          signal: controller.signal,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             jsonrpc: '2.0',
@@ -1560,19 +1594,42 @@ export class SoroWillClient {
             },
           }),
         });
+        if (!response.ok) {
+          throw new SoroWillError(`getEvents poll failed with HTTP status ${response.status}`);
+        }
         const payload = (await response.json()) as {
           result?: { events?: RawEventRecord[]; nextCursor?: string };
+          error?: { code?: number; message?: string };
         };
+        if (payload.error) {
+          throw new SoroWillError(
+            `getEvents poll failed with JSON-RPC error ${payload.error.code}: ${payload.error.message ?? 'unknown error'}`,
+          );
+        }
         for (const raw of payload.result?.events ?? []) {
           if (closed) break;
-          listener(mapEventRecord(raw, this.getContractId()));
+          // Isolate listener failures per event so a throwing listener neither stalls
+          // cursor progress nor causes the same events to be redelivered.
+          try {
+            listener(mapEventRecord(raw, this.getContractId()));
+          } catch (listenerError) {
+            const eventId = raw.id ?? raw.pagingToken ?? 'unknown';
+            options.onError?.(
+              new SoroWillError(`Event listener threw for event ${eventId}`, { cause: listenerError }),
+            );
+          }
         }
         if (payload.result?.nextCursor !== undefined) {
           cursor = payload.result.nextCursor;
         }
       } catch (err) {
-        options.onError?.(err instanceof Error ? err : new Error(String(err)));
+        if (controller.signal.aborted) {
+          options.onError?.(new RequestTimeoutError(this.timeoutMs));
+        } else {
+          options.onError?.(err instanceof Error ? err : new Error(String(err)));
+        }
       } finally {
+        clearTimeout(timeout);
         if (!closed) {
           timer = setTimeout(() => void poll(), pollIntervalMs);
         }
@@ -1818,8 +1875,9 @@ export class SoroWillClient {
         // does not exist on the network, rather than leaking the raw RPC error.
         throw new AccountNotFundedError(publicKey, { cause: getAccountError });
       }
+      const baseFee = BigInt(BASE_FEE) * BigInt(operations.length);
       const builder = new TransactionBuilder(account, {
-        fee: (BigInt(BASE_FEE) * BigInt(operations.length)).toString(),
+        fee: baseFee.toString(),
         networkPassphrase: this.networkPassphrase,
       });
       for (const operation of operations) builder.addOperation(operation);
@@ -1889,8 +1947,12 @@ export class SoroWillClient {
         if (this.autoFeeBumpOnTimeout) {
           this.debugLogger.logPoll(label);
 
-          const feeBumpFee = (BigInt(BASE_FEE) * BigInt(operations.length) * BigInt(2)).toString();
-          const feeBumpBuilder = new TransactionBuilder(account, {
+          const feeBumpFee = (await this.computeBumpedFee(baseFee, options)).toString();
+          // Building the first transaction incremented `account`'s sequence number, so rebuild
+          // from a fresh Account one below the pending transaction's sequence: the resubmission
+          // then reuses that sequence and replaces the pending transaction instead of following it.
+          const retrySource = new Account(publicKey, (BigInt(builtTx.sequence) - 1n).toString());
+          const feeBumpBuilder = new TransactionBuilder(retrySource, {
             fee: feeBumpFee,
             networkPassphrase: this.networkPassphrase,
           });
@@ -2078,23 +2140,45 @@ export class SoroWillClient {
     return this.rpc(() => server.getFeeStats!(), options);
   }
 
+  /**
+   * Verifies the wallet is on the expected network before signing.
+   *
+   * - Wallets that do not implement `getNetwork` are not checked (explicit opt-out).
+   * - If `getNetwork` rejects, a {@link SoroWillError} is thrown with the original error as `cause`.
+   * - An empty or missing passphrase cannot be verified and is treated as a mismatch
+   *   ({@link WalletNetworkMismatchError} with an empty `actualNetworkPassphrase`).
+   */
+  /**
+   * Inclusion fee for a replacement transaction: the network's p90 Soroban inclusion
+   * fee (from fee stats) per operation, but never below the 10x multiplier stellar-core
+   * requires to replace a pending transaction with the same sequence number.
+   */
+  private async computeBumpedFee(originalFee: bigint, options?: RequestOptions): Promise<bigint> {
+    const minimum = originalFee * 10n;
+    try {
+      const stats = await this.getNetworkFeeStats(options);
+      const p90 = BigInt(stats.sorobanInclusionFee.p90);
+      const fromStats = p90 * BigInt(originalFee / BigInt(BASE_FEE) || 1n);
+      return fromStats > minimum ? fromStats : minimum;
+    } catch {
+      return minimum;
+    }
+  }
+
   async assertWalletNetwork(network: { networkPassphrase: string }): Promise<void> {
     if (!this.wallet.getNetwork) {
       return;
     }
 
+    let details: { networkPassphrase?: string };
     try {
-      const details = await this.wallet.getNetwork();
-      if (!details.networkPassphrase) {
-        return;
-      }
-      if (details.networkPassphrase !== network.networkPassphrase) {
-        throw new WalletNetworkMismatchError(network.networkPassphrase, details.networkPassphrase);
-      }
+      details = await this.wallet.getNetwork();
     } catch (error) {
-      if (error instanceof WalletNetworkMismatchError) {
-        throw error;
-      }
+      throw new SoroWillError('Failed to read the wallet network; refusing to sign', { cause: error });
+    }
+    const actual = details?.networkPassphrase ?? '';
+    if (actual !== network.networkPassphrase) {
+      throw new WalletNetworkMismatchError(network.networkPassphrase, actual);
     }
   }
 

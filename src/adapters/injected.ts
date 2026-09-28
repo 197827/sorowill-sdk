@@ -27,7 +27,23 @@ export abstract class InjectedWalletAdapter implements WalletAdapter {
     return this.connection;
   }
 
+  /**
+   * Restores an existing provider connection without prompting when possible,
+   * falling back to {@link connect} only when no connection can be resumed.
+   */
   async reconnect(): Promise<WalletConnection> {
+    if (this.connection && (await this.isConnected())) {
+      return this.connection;
+    }
+    const { isConnected, getPublicKey, getNetwork } = this.provider;
+    if (isConnected && getPublicKey && getNetwork && (await isConnected.call(this.provider))) {
+      const [publicKey, network] = await Promise.all([
+        getPublicKey.call(this.provider),
+        getNetwork.call(this.provider),
+      ]);
+      this.connection = { publicKey, ...network };
+      return this.connection;
+    }
     return this.connect();
   }
 

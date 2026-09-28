@@ -44,7 +44,7 @@ describe('formatUSDC', () => {
   });
 
   it('supports custom decimal precision when formatting', () => {
-    expect(formatUSDC(123_450n, 4)).toBe('12.34');
+    expect(formatUSDC(123_450n, 4)).toBe('12.35');
   });
 });
 
@@ -92,7 +92,7 @@ function makeWill(overrides: Partial<Will> = {}): Will {
   return {
     id: '1',
     owner: 'GABC',
-    token: 'CABC',
+    token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
     balance: '1000000000',
     beneficiaries: [{ address: 'GBEN', percentage: 100 }],
     checkinPeriodDays: 90,

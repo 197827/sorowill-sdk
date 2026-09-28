@@ -67,6 +67,7 @@ export {
 export type { WalletAdapter, WalletConnection } from './wallet';
 
 export { createAlbedoAdapter } from './adapters/albedo';
+export type { AlbedoAdapterOptions } from './adapters/albedo';
 export {
   LocalStorageWalletConnectSessionStore,
   MemoryWalletConnectSessionStore,
@@ -123,6 +124,7 @@ export {
   KeeperBountyExceedsMaxError,
   MergeWouldExceedLimitsError,
   NotGuardianError,
+  GuardianValidationError,
   InvalidCursorError,
   NotOwnerError,
   NotSameOwnerError,
@@ -184,6 +186,7 @@ export {
   formatUSDC,
   getNextActionableState,
   getTimeUntilCheckin,
+  hasDuplicateBeneficiaries,
   isBeneficiary,
   isCheckinDue,
   isGuardian,
