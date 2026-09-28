@@ -6,6 +6,18 @@ interface InFlightOperation<T> {
   controller: AbortController;
 }
 
+/**
+ * Shared, process-wide tracker used to deduplicate identical concurrent
+ * requests across every SoroWillClient instance (multiple tabs, workers, etc.).
+ *
+ * A per-client tracker only deduplicates calls made through the same client
+ * instance. When two clients issue the same request concurrently they each
+ * hold their own tracker and both hit the network. Passing this singleton to
+ * `new SoroWillClient({ inFlightTracker: globalInFlightTracker })` (or simply
+ * reusing a single SoroWillClient instance) makes the deduplication global.
+ */
+export const globalInFlightTracker = /* @__PURE__ */ new InFlightTracker();
+
 export class InFlightTracker {
   private readonly inFlight = new Map<OperationKey, InFlightOperation<unknown>>();
 
