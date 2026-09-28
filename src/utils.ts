@@ -3,8 +3,18 @@ import { StrKey } from '@stellar/stellar-sdk';
 import type { Beneficiary, Will } from './types';
 import { WillStatus } from './types';
 
-/** USDC (and most Soroban SEP-41 tokens) use 7 decimal places, matching classic Stellar asset precision. */
-const USDC_DECIMALS = 7;
+/**
+ * Default decimal precision assumed by {@link formatUSDC} and
+ * {@link toStroops} when the caller does not supply an explicit `decimals`
+ * value.
+ *
+ * **Assumption**: this default of 6 matches canonical USDC on most chains
+ * (Ethereum, Polygon, etc.). USDC-like or bridged tokens can use a different
+ * scale (e.g. 7 decimals for classic Stellar asset precision, or 8 for some
+ * wrapped tokens), so callers handling such tokens must pass the token's
+ * actual `decimals` explicitly to avoid displaying incorrect amounts.
+ */
+const USDC_DECIMALS = 6;
 
 /**
  * Approximate Soroban ledger close time, in milliseconds. Matches the
@@ -38,12 +48,52 @@ export function formatUSDC(stroops: bigint, decimals = USDC_DECIMALS): string {
 }
 
 /**
+ * Expands a number written in scientific notation (e.g. `"1e-8"`,
+ * `"1.5e3"`, `"-2.5E-4"`) into its equivalent plain decimal string, so the
+ * rest of {@link toStroops} can parse it with the same logic used for
+ * standard decimal notation. Returns `null` when `value` is not valid
+ * scientific notation.
+ */
+function expandScientificNotation(value: string): string | null {
+  const match = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(value);
+  if (!match) {
+    return null;
+  }
+
+  const [, sign, intPart, fracPart = '', expPart] = match;
+  const exponent = Number(expPart);
+  const digits = intPart + fracPart;
+  // Position of the decimal point relative to `digits` after applying the exponent.
+  const pointPos = intPart.length + exponent;
+
+  let expanded: string;
+  if (pointPos <= 0) {
+    expanded = `0.${'0'.repeat(-pointPos)}${digits}`;
+  } else if (pointPos >= digits.length) {
+    expanded = `${digits}${'0'.repeat(pointPos - digits.length)}`;
+  } else {
+    expanded = `${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`;
+  }
+
+  return `${sign}${expanded}`;
+}
+
+/**
  * Parses a human-readable decimal USDC string (e.g. `"1234.50"` or
  * `"1,234.5"`) into base units (stroops), as a `bigint`.
+ *
+ * `decimals` is the token's on-chain decimal precision and defaults to
+ * {@link USDC_DECIMALS} (6). Pass the token's actual `decimals` when it is
+ * not 6 so the parsed base units match the token's scale.
+ *
+ * Scientific notation (e.g. `"1e-8"`) is expanded to standard decimal
+ * notation before the `decimals` offset is applied, so
+ * `toStroops("1e-8", 8) === 100000000n`.
  */
 export function toStroops(usdc: string, decimals = USDC_DECIMALS): bigint {
   const cleaned = usdc.replace(/,/g, '').trim();
-  if (cleaned === '' || !/^-?\d*\.?\d*$/.test(cleaned) || cleaned === '-' || cleaned === '.') {
+  const expanded = expandScientificNotation(cleaned) ?? cleaned;
+  if (expanded === '' || !/^-?\d*\.?\d*$/.test(expanded) || expanded === '-' || expanded === '.') {
     throw new Error(`Invalid USDC amount: "${usdc}"`);
   }
 

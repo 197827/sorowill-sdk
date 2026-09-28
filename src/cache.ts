@@ -77,6 +77,20 @@ function stableStringify(value: unknown): string {
   });
 }
 
+/**
+ * Builds a locale-agnostic cache key for a read method.
+ *
+ * Cache key design:
+ * - Keys are derived ONLY from the method name and its non-locale arguments.
+ * - Locale-dependent inputs (e.g. `locale`, `language`, `i18n`) are stripped
+ *   before serialization so the same underlying data maps to a single key
+ *   regardless of the active language.
+ * - Locale-dependent formatting (currency, number, date formatting) MUST be
+ *   applied AFTER retrieving the cached value, never before caching it.
+ *
+ * This guarantees that switching languages mid-app does not return stale data
+ * formatted for the previous locale.
+ */
 export function createReadCacheKey(method: string, args: Record<string, unknown>): string {
   return `${method}:${stableStringify(args)}`;
 }
