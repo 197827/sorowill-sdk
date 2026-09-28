@@ -44,7 +44,29 @@ describe('MultisigCollector', () => {
   it('throws if threshold is less than 1', () => {
     expect(
       () => new MultisigCollector({ transactionXdr: '', networkPassphrase: '', threshold: 0 }),
-    ).toThrow('Threshold must be at least 1');
+    ).toThrow('Threshold must be an integer of at least 1');
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 1.5, 0, -1])('rejects invalid threshold %s', (threshold) => {
+    expect(
+      () => new MultisigCollector({ transactionXdr: SAMPLE_TX_XDR, networkPassphrase: 'Test Network', threshold }),
+    ).toThrow('Threshold must be an integer of at least 1');
+  });
+
+  it('accepts a valid integer threshold', () => {
+    const c = new MultisigCollector({ transactionXdr: SAMPLE_TX_XDR, networkPassphrase: 'Test Network', threshold: 3 });
+    expect(c.threshold).toBe(3);
+  });
+
+  it('fromJSON rejects corrupted threshold data', () => {
+    expect(() =>
+      MultisigCollector.fromJSON({
+        transactionXdr: SAMPLE_TX_XDR,
+        networkPassphrase: 'Test Network',
+        threshold: Number.NaN,
+        signatures: [],
+      }),
+    ).toThrow('Threshold must be an integer of at least 1');
   });
 
   it('adds signatures and tracks count', () => {

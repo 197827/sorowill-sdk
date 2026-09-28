@@ -79,8 +79,8 @@ export class MultisigCollector {
   private readonly _signatures: CollectedSignature[] = [];
 
   constructor(options: MultisigCollectorOptions) {
-    if (options.threshold < 1) {
-      throw new Error('Threshold must be at least 1');
+    if (!Number.isInteger(options.threshold) || options.threshold < 1) {
+      throw new Error('Threshold must be an integer of at least 1');
     }
     validateTransactionXdr(options.transactionXdr);
     this._transactionXdr = options.transactionXdr;

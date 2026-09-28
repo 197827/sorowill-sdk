@@ -76,6 +76,11 @@ export interface WalletConnectAdapterOptions {
    * or experiencing relay message loss.
    */
   timeoutMs?: number;
+  /**
+   * Milliseconds to wait for the wallet to approve the pairing in {@link WalletConnectAdapter.connect}
+   * before rejecting. Defaults to 300000.
+   */
+  connectTimeoutMs?: number;
   onPairingUri?(uri: string): void | Promise<void>;
   getPublicKeyFromSession?(session: WalletConnectSession): string;
   getNetworkFromSession?(session: WalletConnectSession): { network: string; networkPassphrase: string };
@@ -92,6 +97,7 @@ const DEFAULT_REQUIRED_NAMESPACES: Record<string, WalletConnectSessionNamespace>
 
 const DEFAULT_DISCONNECT_REASON = { code: 6000, message: 'Disconnected by client' };
 const DEFAULT_SIGN_TIMEOUT_MS = 120_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 300_000;
 
 function getFirstAccount(session: WalletConnectSession): string | undefined {
   const namespaces = session.namespaces ?? {};
@@ -273,7 +279,21 @@ export class WalletConnectAdapter implements WalletAdapter {
       await this.options.onPairingUri?.(connection.uri);
     }
 
-    const session = await connection.approval();
+    const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    let timeoutHandle: ReturnType<typeof setTimeout>;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error(`WalletConnect pairing approval timed out after ${connectTimeoutMs}ms`)),
+        connectTimeoutMs,
+      );
+    });
+
+    let session: WalletConnectSession;
+    try {
+      session = await Promise.race([connection.approval(), timeoutPromise]);
+    } finally {
+      clearTimeout(timeoutHandle!);
+    }
     return this.useSession(session);
   }
 
