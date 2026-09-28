@@ -25,6 +25,23 @@ const USDC_DECIMALS = 6;
 export const SOROBAN_LEDGER_CLOSE_TIME_MS = 5_000;
 
 /**
+ * Generates a random nonce for transaction building.
+ *
+ * **Security assumption**: nonces MUST be unpredictable. An attacker who can
+ * predict a nonce can preempt the transaction (e.g. by front-running it with
+ * a colliding transaction ID). This function therefore uses the platform
+ * CSPRNG (`crypto.getRandomValues`) rather than `Math.random()`, which is
+ * seeded deterministically and trivially predictable.
+ *
+ * Returns a 32-character lowercase hex string (128 bits of entropy).
+ */
+export function generateRandomNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * Formats a base-unit token amount (e.g. contract-side `i128` stroops) as a
  * human-readable decimal string with thousands separators, e.g.
  * `formatUSDC(12345000000n) === "1,234.50"`.
@@ -277,84 +294,6 @@ export interface NextActionableStateOptions {
  * Computes {@link NextActionableState} for `will` from the perspective of
  * `connectedAddress`. Only the owner may check in, cancel, or emergency
  * check in; triggering and releasing are permissionless once their
- * on-chain preconditions are met; and guardians may vote for an early
- * release at any point before the will is released or cancelled.
- *
- * PendingConfirmation: the will exists but is not yet active, so no
- * owner actions are available until it transitions to Active.
- *
- * Settled: the will is fully closed; no further actions are possible.
- */
-export function getNextActionableState(
-  will: Will,
-  connectedAddress: string,
-  nowOrOptions: Date | NextActionableStateOptions = new Date(),
-): NextActionableState {
-  const now = nowOrOptions instanceof Date ? nowOrOptions : new Date();
-  const options: NextActionableStateOptions = nowOrOptions instanceof Date ? {} : nowOrOptions;
+ * on-chain preconditions are met; and guardians may vote for 
 
-  // Terminal / pre-active states with no available actions
-  if (
-    will.status === WillStatus.PendingConfirmation ||
-    will.status === WillStatus.Released ||
-    will.status === WillStatus.Cancelled ||
-    will.status === WillStatus.Settled
-  ) {
-    return {
-      canCheckIn: false,
-      canTrigger: false,
-      canEmergencyCheckIn: false,
-      canRelease: false,
-      canCancel: false,
-      canGuardianVote: false,
-    };
-  }
-
-  const isOwner = will.owner === connectedAddress;
-  const isWillGuardian = isGuardian(will, connectedAddress);
-
-  const graceDeadlineMs =
-    (will.triggerTime?.getTime() ?? 0) + will.gracePeriodDays * 86_400 * 1000;
-  const isGracePeriodExpired = will.triggerTime !== null && now.getTime() >= graceDeadlineMs;
-
-  return {
-    canCheckIn: isOwner && will.status === WillStatus.Active,
-    canTrigger: will.status === WillStatus.Active && isCheckinDue(will),
-    canEmergencyCheckIn: isOwner && will.status === WillStatus.Triggered && !isGracePeriodExpired,
-    canRelease: will.status === WillStatus.Triggered && isGracePeriodExpired,
-    canCancel: isOwner && will.status === WillStatus.Active,
-    canGuardianVote:
-      isWillGuardian &&
-      !options.guardianAlreadyVoted &&
-      (will.status === WillStatus.Active || will.status === WillStatus.Triggered),
-  };
-}
-/**
- * Validates a guardian list: empty list is valid (guardians are optional),
- * at most {@link MAX_GUARDIANS} entries, every address (including the
- * optional `ownerAddress`) is a syntactically valid Stellar public key, no
- * duplicate addresses, and no owner address in the list.
- *
- * @param guardians - The list of guardian addresses to validate.
- * @param ownerAddress - Optional owner address; when supplied, the function
- *                       rejects any guardian that matches it.
- */
-export function validateGuardians(guardians: string[], ownerAddress?: string): boolean {
-  if (guardians.length > MAX_GUARDIANS) {
-    return false;
-  }
-  if (!guardians.every((address) => StrKey.isValidEd25519PublicKey(address))) {
-    return false;
-  }
-  if (ownerAddress !== undefined && !StrKey.isValidEd25519PublicKey(ownerAddress)) {
-    return false;
-  }
-  const unique = new Set(guardians);
-  if (unique.size !== guardians.length) {
-    return false;
-  }
-  if (ownerAddress !== undefined && unique.has(ownerAddress)) {
-    return false;
-  }
-  return true;
-}
+/* … truncated 3004 chars — edit only what you need near the top … */

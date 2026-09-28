@@ -1,6 +1,6 @@
 import type FreighterApi from '@stellar/freighter-api';
 
-import { FreighterInstallCheckError, SignTransactionTimeoutError } from './errors';
+import { FreighterInstallCheckError, SignTransactionTimeoutError, WalletNetworkMismatchError } from './errors';
 
 /**
  * `@stellar/freighter-api` is an optional peer dependency — consumers who
@@ -207,7 +207,40 @@ export interface WalletAdapter {
   getNetwork?(): Promise<{ network: string; networkPassphrase: string }>;
 }
 
+/**
+ * Options accepted by {@link FreighterWalletAdapter}.
+ *
+ * `expectedNetworkPassphrase` is the network the SDK/client is configured for.
+ * When provided, the adapter verifies the wallet's current network against it
+ * on `connect()`/`reconnect()` and rejects with a
+ * {@link WalletNetworkMismatchError} on mismatch — instead of letting a
+ * testnet wallet silently sign for a mainnet-configured client.
+ */
+export interface FreighterWalletAdapterOptions {
+  expectedNetworkPassphrase?: string;
+}
+
 export class FreighterWalletAdapter implements WalletAdapter {
+  private readonly expectedNetworkPassphrase?: string;
+
+  constructor(options: FreighterWalletAdapterOptions = {}) {
+    this.expectedNetworkPassphrase = options.expectedNetworkPassphrase;
+  }
+
+  /**
+   * Rejects with a {@link WalletNetworkMismatchError} when the wallet's
+   * reported network passphrase does not match the configured one. No-op when
+   * no expected passphrase was configured or the wallet reports none.
+   */
+  private assertNetworkMatches(networkPassphrase: string): void {
+    if (!this.expectedNetworkPassphrase || !networkPassphrase) {
+      return;
+    }
+    if (networkPassphrase !== this.expectedNetworkPassphrase) {
+      throw new WalletNetworkMismatchError(this.expectedNetworkPassphrase, networkPassphrase);
+    }
+  }
+
   /**
    * Reports whether the Freighter extension is present and reachable.
    *
@@ -241,10 +274,13 @@ export class FreighterWalletAdapter implements WalletAdapter {
       throw new Error(networkDetails.error.message);
     }
 
+    const networkPassphrase = networkDetails?.networkPassphrase ?? '';
+    this.assertNetworkMatches(networkPassphrase);
+
     return {
       publicKey: access.address,
       network: networkDetails?.network ?? '',
-      networkPassphrase: networkDetails?.networkPassphrase ?? '',
+      networkPassphrase,
     };
   }
 
@@ -256,10 +292,13 @@ export class FreighterWalletAdapter implements WalletAdapter {
       throw new Error(networkDetails.error.message);
     }
 
+    const networkPassphrase = networkDetails?.networkPassphrase ?? '';
+    this.assertNetworkMatches(networkPassphrase);
+
     return {
       publicKey,
       network: networkDetails?.network ?? '',
-      networkPassphrase: networkDetails?.networkPassphrase ?? '',
+      networkPassphrase,
     };
   }
 
