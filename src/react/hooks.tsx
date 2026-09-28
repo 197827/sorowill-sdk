@@ -25,6 +25,12 @@ export interface UseQueryResult<T> {
   data: T | null;
   error: Error | null;
   loading: boolean;
+  /**
+   * `true` while a request for a new input is in flight and `data` still
+   * holds the result of the previous input. `data` is reset to `null`
+   * whenever the input becomes falsy, so it is never stale in that case.
+   */
+  isStale: boolean;
   refetch: () => void;
 }
 
@@ -57,6 +63,7 @@ export function useWill(
   const [data, setData] = getReact().useState<Will | null>(null);
   const [error, setError] = getReact().useState<Error | null>(null);
   const [loading, setLoading] = getReact().useState(false);
+  const [isStale, setIsStale] = getReact().useState(false);
   const [fetchKey, setFetchKey] = getReact().useState(0);
 
   const refetch = getReact().useCallback(() => setFetchKey((k) => k + 1), []);
@@ -64,6 +71,9 @@ export function useWill(
   getReact().useEffect(() => {
     if (!willId) {
       setData(null);
+      setError(null);
+      setLoading(false);
+      setIsStale(false);
       return;
     }
 
@@ -71,6 +81,7 @@ export function useWill(
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setIsStale(true);
 
     client
       .getWill(willId, { signal: controller.signal })
@@ -78,12 +89,14 @@ export function useWill(
         if (!cancelled) {
           setData(will);
           setLoading(false);
+          setIsStale(false);
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setLoading(false);
+          setIsStale(false);
         }
       });
 
@@ -93,7 +106,7 @@ export function useWill(
     };
   }, [client, willId, fetchKey]);
 
-  return { data, error, loading, refetch };
+  return { data, error, loading, isStale, refetch };
 }
 
 /**
@@ -112,6 +125,7 @@ export function useWillsByOwner(
   const [data, setData] = getReact().useState<Will[] | null>(null);
   const [error, setError] = getReact().useState<Error | null>(null);
   const [loading, setLoading] = getReact().useState(false);
+  const [isStale, setIsStale] = getReact().useState(false);
   const [fetchKey, setFetchKey] = getReact().useState(0);
 
   const refetch = getReact().useCallback(() => setFetchKey((k) => k + 1), []);
@@ -119,6 +133,9 @@ export function useWillsByOwner(
   getReact().useEffect(() => {
     if (!owner) {
       setData(null);
+      setError(null);
+      setLoading(false);
+      setIsStale(false);
       return;
     }
 
@@ -126,6 +143,7 @@ export function useWillsByOwner(
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setIsStale(true);
 
     client
       .getWillsByOwner(owner, { signal: controller.signal })
@@ -133,12 +151,14 @@ export function useWillsByOwner(
         if (!cancelled) {
           setData(wills);
           setLoading(false);
+          setIsStale(false);
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setLoading(false);
+          setIsStale(false);
         }
       });
 
@@ -148,7 +168,7 @@ export function useWillsByOwner(
     };
   }, [client, owner, fetchKey]);
 
-  return { data, error, loading, refetch };
+  return { data, error, loading, isStale, refetch };
 }
 
 /**
@@ -167,6 +187,7 @@ export function useWillsByBeneficiary(
   const [data, setData] = getReact().useState<Will[] | null>(null);
   const [error, setError] = getReact().useState<Error | null>(null);
   const [loading, setLoading] = getReact().useState(false);
+  const [isStale, setIsStale] = getReact().useState(false);
   const [fetchKey, setFetchKey] = getReact().useState(0);
 
   const refetch = getReact().useCallback(() => setFetchKey((k) => k + 1), []);
@@ -174,6 +195,9 @@ export function useWillsByBeneficiary(
   getReact().useEffect(() => {
     if (!beneficiary) {
       setData(null);
+      setError(null);
+      setLoading(false);
+      setIsStale(false);
       return;
     }
 
@@ -181,6 +205,7 @@ export function useWillsByBeneficiary(
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setIsStale(true);
 
     client
       .getWillsByBeneficiary(beneficiary, { signal: controller.signal })
@@ -188,12 +213,14 @@ export function useWillsByBeneficiary(
         if (!cancelled) {
           setData(wills);
           setLoading(false);
+          setIsStale(false);
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setLoading(false);
+          setIsStale(false);
         }
       });
 
@@ -203,5 +230,5 @@ export function useWillsByBeneficiary(
     };
   }, [client, beneficiary, fetchKey]);
 
-  return { data, error, loading, refetch };
+  return { data, error, loading, isStale, refetch };
 }
