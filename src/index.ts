@@ -67,6 +67,7 @@ export {
 export type { WalletAdapter, WalletConnection } from './wallet';
 
 export { createAlbedoAdapter } from './adapters/albedo';
+export type { AlbedoAdapterOptions } from './adapters/albedo';
 export {
   LocalStorageWalletConnectSessionStore,
   MemoryWalletConnectSessionStore,

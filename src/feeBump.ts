@@ -23,8 +23,11 @@ export interface FeeBumpOptions {
   innerTransactionXdr: string;
   /** The fee source account's public key (the account sponsoring the fee). */
   feeSourcePublicKey: string;
-  /** The maximum fee the sponsor is willing to pay, in stroops. Defaults to BASE_FEE. */
-  fee: string;
+  /**
+   * The maximum fee the sponsor is willing to pay, in stroops. Defaults to
+   * the inner transaction's fee when omitted.
+   */
+  fee?: string;
 }
 
 /** Options for submitting a signed fee-bump transaction. */
@@ -72,7 +75,7 @@ export async function buildFeeBumpXdr(options: FeeBumpOptions): Promise<string> 
 
   const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
     feeSource,
-    options.fee,
+    options.fee || innerTx.fee,
     innerTx,
     config.networkPassphrase,
   );

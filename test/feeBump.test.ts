@@ -184,6 +184,18 @@ describe('feeBump', () => {
       expect(xdr).toBe('MOCK_TX_XDR');
     });
 
+    it('should default the fee to the inner transaction fee when omitted', async () => {
+      const spy = vi.spyOn(TransactionBuilder as any, 'buildFeeBumpTransaction');
+      await buildFeeBumpXdr({
+        network: 'testnet',
+        innerTransactionXdr: 'INNER_TX_XDR',
+        feeSourcePublicKey: 'GFEEsourcepublickey',
+      });
+
+      expect(spy).toHaveBeenCalledWith(expect.anything(), '1000', expect.anything(), expect.anything());
+      spy.mockRestore();
+    });
+
     it('should accept realistic Soroban fee amounts', async () => {
       const sorobanFee = '50000';
       const xdr = await buildFeeBumpXdr({
