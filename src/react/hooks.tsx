@@ -1,4 +1,4 @@
-import { createRequire } from 'node:module';
+import * as React from 'react';
 import type ReactNamespace from 'react';
 
 import { SoroWillClient } from '../SoroWillClient';
@@ -6,18 +6,14 @@ import type { SoroWillClientOptions } from '../SoroWillClient';
 import type { Will } from '../types';
 
 /**
- * `react` is an optional peer dependency of this subpath — a static
- * `import ... from 'react'` would fail to resolve for a consumer that hasn't
- * installed it, even before any hook is actually called. Loading it lazily
- * via `createRequire` means the module only needs to resolve when a hook in
- * this file actually runs.
+ * `react` is an optional peer dependency of this subpath. It is imported
+ * statically via ES6 `import` syntax so that ESM-only bundlers (Vite,
+ * esbuild, Webpack 5+) can resolve it at build time without relying on
+ * CommonJS `require`/`createRequire`, which those bundlers do not support.
  */
-let react: typeof ReactNamespace | undefined;
+const react: typeof ReactNamespace = React;
 function getReact(): typeof ReactNamespace {
-  if (!react) {
-    react = createRequire(import.meta.url)('react');
-  }
-  return react!;
+  return react;
 }
 
 /** Standard data-fetching state returned by the hooks. */
