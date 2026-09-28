@@ -29,6 +29,49 @@ const DEFAULT_SIGN_TIMEOUT_MS = 120_000;
  */
 const FREIGHTER_NOT_INSTALLED_CODE = -1;
 
+/**
+ * The structured signature response some wallet adapters (WalletConnect,
+ * xBull, …) return instead of a bare signed-XDR string. The SDK normalizes
+ * this to the `envelope_xdr` string so callers always receive a string.
+ */
+export interface SignatureResponse {
+  envelope_xdr: string;
+  hash: string;
+}
+
+/**
+ * Normalizes a wallet signer result to the signed XDR string the SDK expects.
+ *
+ * Some adapters return a bare XDR string, while others (WalletConnect, xBull,
+ * …) return a {@link SignatureResponse} object. Passing the object through as
+ * if it were a string silently fails downstream, so we validate the shape here
+ * and throw a clear error for anything malformed.
+ */
+export function normalizeSignatureResponse(
+  result: string | SignatureResponse,
+): string {
+  if (typeof result === 'string') {
+    if (result.length === 0) {
+      throw new Error('Wallet signer returned an empty signed XDR string.');
+    }
+    return result;
+  }
+
+  if (result && typeof result === 'object') {
+    const { envelope_xdr } = result as SignatureResponse;
+    if (typeof envelope_xdr === 'string' && envelope_xdr.length > 0) {
+      return envelope_xdr;
+    }
+    throw new Error(
+      'Wallet signer returned a SignatureResponse without a valid `envelope_xdr` string.',
+    );
+  }
+
+  throw new Error(
+    `Wallet signer returned an unexpected value of type ${typeof result}; expected a signed XDR string or a SignatureResponse object.`,
+  );
+}
+
 /** Result of a successful wallet connection. */
 export interface WalletConnection {
   publicKey: string;
@@ -156,7 +199,10 @@ export interface WalletAdapter {
   reconnect(): Promise<WalletConnection>;
   disconnect(): Promise<void>;
   getPublicKey(): Promise<string>;
-  signTransaction(transactionXdr: string, opts: SignTransactionOptions): Promise<string>;
+  signTransaction(
+    transactionXdr: string,
+    opts: SignTransactionOptions,
+  ): Promise<string | SignatureResponse>;
   /** Reports the network this wallet is currently set to, without prompting the user. Optional — not every wallet adapter can report this. */
   getNetwork?(): Promise<{ network: string; networkPassphrase: string }>;
 }
