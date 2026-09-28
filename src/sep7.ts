@@ -1,5 +1,9 @@
+import { xdr } from '@stellar/stellar-sdk';
+
 export interface BuildSep7TxUriOptions {
+  /** Absolute http(s) URL; emitted with the `url:` prefix required by SEP-0007. */
   callbackUrl: string;
+  /** Message shown to the user. SEP-0007 limits it to 300 characters; longer values are rejected. */
   message?: string;
   networkPassphrase?: string;
   originDomain?: string;
@@ -10,6 +14,41 @@ export interface Sep7CallbackResult {
   signerAddress?: string | undefined;
   status?: string | undefined;
   message?: string | undefined;
+}
+
+export interface ParseSep7CallbackOptions {
+  /**
+   * The transaction XDR originally sent for signing. When provided, the
+   * callback's transaction must match it (signatures are ignored).
+   */
+  expectedTransactionXdr?: string;
+}
+
+const SEP7_MAX_MESSAGE_LENGTH = 300;
+const SEP7_FAILURE_STATUSES = new Set([
+  'error',
+  'fail',
+  'failed',
+  'failure',
+  'reject',
+  'rejected',
+  'declined',
+  'denied',
+  'cancel',
+  'canceled',
+  'cancelled',
+]);
+
+function decodeEnvelope(transactionXdr: string, label: string): xdr.TransactionEnvelope {
+  try {
+    return xdr.TransactionEnvelope.fromXDR(transactionXdr, 'base64');
+  } catch {
+    throw new Error(`SEP-7 ${label} is not a valid transaction envelope XDR`);
+  }
+}
+
+function transactionBodyXdr(envelope: xdr.TransactionEnvelope): string {
+  return (envelope.value() as { tx(): { toXDR(format: 'base64'): string } }).tx().toXDR('base64');
 }
 
 function normalizeSep7Params(input: string | URL | URLSearchParams): URLSearchParams {
@@ -53,9 +92,23 @@ export function buildSep7TxUri(transactionXdr: string, options: BuildSep7TxUriOp
     throw new Error('SEP-7 callback URL is required');
   }
 
+  let callbackUrl: URL;
+  try {
+    callbackUrl = new URL(options.callbackUrl.trim());
+  } catch {
+    throw new Error('SEP-7 callback URL must be an absolute http or https URL');
+  }
+  if (callbackUrl.protocol !== 'http:' && callbackUrl.protocol !== 'https:') {
+    throw new Error('SEP-7 callback URL must be an absolute http or https URL');
+  }
+
+  if (options.message && options.message.length > SEP7_MAX_MESSAGE_LENGTH) {
+    throw new Error(`SEP-7 message must be at most ${SEP7_MAX_MESSAGE_LENGTH} characters`);
+  }
+
   const params = new URLSearchParams({
     xdr: transactionXdr,
-    callback: options.callbackUrl,
+    callback: `url:${options.callbackUrl.trim()}`,
   });
 
   if (options.message) {
@@ -73,7 +126,10 @@ export function buildSep7TxUri(transactionXdr: string, options: BuildSep7TxUriOp
   return `web+stellar:tx?${encodeSep7Params(params)}`;
 }
 
-export function parseSep7Callback(input: string | URL | URLSearchParams): Sep7CallbackResult {
+export function parseSep7Callback(
+  input: string | URL | URLSearchParams,
+  options: ParseSep7CallbackOptions = {},
+): Sep7CallbackResult {
   const params = normalizeSep7Params(input);
   const transactionXdrValue =
     params.get('xdr') ??
@@ -90,6 +146,18 @@ export function parseSep7Callback(input: string | URL | URLSearchParams): Sep7Ca
   const signerAddress: string | undefined = signerAddressValue ?? undefined;
   const status: string | undefined = params.get('status') ?? undefined;
   const message: string | undefined = params.get('message') ?? params.get('msg') ?? undefined;
+
+  if (status !== undefined && SEP7_FAILURE_STATUSES.has(status.trim().toLowerCase())) {
+    throw new Error(`SEP-7 callback reported status "${status}"${message ? `: ${message}` : ''}`);
+  }
+
+  const envelope = decodeEnvelope(transactionXdr, 'callback transaction');
+  if (options.expectedTransactionXdr !== undefined) {
+    const expected = decodeEnvelope(options.expectedTransactionXdr, 'expected transaction');
+    if (transactionBodyXdr(envelope) !== transactionBodyXdr(expected)) {
+      throw new Error('SEP-7 callback transaction does not match the requested transaction');
+    }
+  }
 
   const result: Sep7CallbackResult = { transactionXdr };
   if (signerAddress !== undefined) result.signerAddress = signerAddress;

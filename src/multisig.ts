@@ -91,8 +91,8 @@ export class MultisigCollector {
   private _startedAt: number;
 
   constructor(options: MultisigCollectorOptions) {
-    if (options.threshold < 1) {
-      throw new Error('Threshold must be at least 1');
+    if (!Number.isInteger(options.threshold) || options.threshold < 1) {
+      throw new Error('Threshold must be an integer of at least 1');
     }
     if (options.timeoutMs !== undefined && options.timeoutMs <= 0) {
       throw new Error('timeoutMs must be a positive number of milliseconds');
@@ -171,6 +171,7 @@ export class MultisigCollector {
    * @throws {MultisigTimeoutError} if the coordination timeout has elapsed.
    * @throws if the signer has already signed.
    * @throws if signerPublicKey is not a valid Stellar Ed25519 public key.
+   * @throws if signature is empty, not a valid decorated signature, or its hint does not match the signer.
    */
   addSignature(signerPublicKey: string, signature: string): void {
     this.assertNotTimedOut();
@@ -182,6 +183,23 @@ export class MultisigCollector {
     }
     if (this._signatures.some((s) => s.signerPublicKey === signerPublicKey)) {
       throw new Error(`Signer ${signerPublicKey} has already signed`);
+    }
+    if (!signature) {
+      throw new Error(`Signature for signer ${signerPublicKey} must not be empty`);
+    }
+    let decorated: xdr.DecoratedSignature;
+    try {
+      decorated = xdr.DecoratedSignature.fromXDR(signature, 'base64');
+    } catch {
+      throw new Error(
+        `Signature for signer ${signerPublicKey} is not a valid base64-encoded decorated signature`,
+      );
+    }
+    if (decorated.signature().length !== 64) {
+      throw new Error(`Signature for signer ${signerPublicKey} must be 64 bytes`);
+    }
+    if (!decorated.hint().equals(Keypair.fromPublicKey(signerPublicKey).signatureHint())) {
+      throw new Error(`Signature hint does not match signer ${signerPublicKey}`);
     }
     this._signatures.push({ signerPublicKey, signature });
   }

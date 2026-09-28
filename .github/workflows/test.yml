@@ -39,7 +39,16 @@ jobs:
       - name: Test with coverage
         run: npm run test:coverage
 
+      - name: Enforce coverage goal (80%)
+        run: npx nyc check-coverage --lines 80 --functions 80 --branches 80 --statements 80
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+
       - name: Warn if Soroban sandbox integration tests are skipped
         if: env.SOROBAN_CONTRACT_ID == '' || env.SOROBAN_OWNER_ACCOUNT == '' || env.SOROBAN_BENEFICIARY_ACCOUNT == ''
         run: echo "::warning file=test/soroban-sandbox-integration.test.ts::soroban-sandbox-integration.test.ts was skipped — SOROBAN_CONTRACT_ID, SOROBAN_OWNER_ACCOUNT, and SOROBAN_BENEFICIARY_ACCOUNT are not set in this workflow. See CONTRIBUTING.md for how to run it locally against a sandbox."
-
