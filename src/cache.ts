@@ -32,7 +32,14 @@ interface CacheEntry {
 }
 
 function serializeCacheValue(value: unknown): string {
-  return JSON.stringify(value, (_key, currentValue) => {
+  return JSON.stringify(value, function (key, currentValue) {
+    // `Date` defines `toJSON`, so by the time a replacer sees it, it has
+    // already been converted to an ISO string. Read the pre-toJSON value off
+    // the holder (`this`) to tell a real Date apart from a plain ISO string.
+    const original = (this as Record<string, unknown>)[key];
+    if (original instanceof Date) {
+      return { __type: 'date', value: original.toISOString() };
+    }
     if (typeof currentValue === 'bigint') {
       return { __type: 'bigint', value: currentValue.toString() };
     }
@@ -46,11 +53,15 @@ function deserializeCacheValue<T>(value: string): T {
       currentValue &&
       typeof currentValue === 'object' &&
       '__type' in currentValue &&
-      currentValue.__type === 'bigint' &&
       'value' in currentValue &&
       typeof currentValue.value === 'string'
     ) {
-      return BigInt(currentValue.value);
+      if (currentValue.__type === 'bigint') {
+        return BigInt(currentValue.value);
+      }
+      if (currentValue.__type === 'date') {
+        return new Date(currentValue.value);
+      }
     }
     return currentValue;
   }) as T;

@@ -396,13 +396,20 @@ function mapWill(raw: unknown): Will {
 }
 
 /**
- * Shallow-clones a `Will`, including its `beneficiaries`/`guardians` arrays.
- * Read-cache hits return the exact cached object, so a caller mutating the
- * arrays on a returned `Will` would otherwise corrupt the cache for every
- * subsequent read of the same will (#187).
+ * Deep-clones a `Will`, including its `beneficiaries`/`guardians` arrays and
+ * the `lastCheckin`/`triggerTime` `Date` fields. Read-cache hits return the
+ * exact cached object, so a caller mutating a returned `Will` (including
+ * calling `setTime` on a `Date` field) would otherwise corrupt the cache for
+ * every subsequent read of the same will (#187, #399).
  */
 function cloneWill(will: Will): Will {
-  return { ...will, beneficiaries: [...will.beneficiaries], guardians: [...will.guardians] };
+  return {
+    ...will,
+    beneficiaries: will.beneficiaries.map((beneficiary) => ({ ...beneficiary })),
+    guardians: [...will.guardians],
+    lastCheckin: new Date(will.lastCheckin.getTime()),
+    triggerTime: will.triggerTime === null ? null : new Date(will.triggerTime.getTime()),
+  };
 }
 
 function mapWillList(raw: unknown): Will[] {

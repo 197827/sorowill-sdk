@@ -345,6 +345,10 @@ For applications that need custom signing logic (e.g. multi-sig, custom key deri
 | Export | Kind | Source module | Description |
 |---|---|---|---|
 | `ReadCache` | class | `cache` | In-memory read cache with optional TTL and persistence |
+| `MemoryCachePersistenceAdapter` | class | `cache` | Persistence adapter backed by an in-memory map |
+| `LocalStorageCachePersistenceAdapter` | class | `cache` | Persistence adapter backed by `window.localStorage` |
+| `IndexedDbCachePersistenceAdapter` | class | `cache` | Persistence adapter backed by IndexedDB |
+| `createReadCacheKey` | function | `cache` | Builds a stable cache key from a method name and its arguments |
 
 ### Hooks
 
@@ -428,7 +432,16 @@ For applications that need custom signing logic (e.g. multi-sig, custom key deri
 | `WalletNetworkMismatchError` | class | `errors` | The wallet's active network does not match the client's configured network |
 | `FreighterInstallCheckError` | class | `errors` | An unexpected error occurred while checking whether Freighter is installed |
 | `SoroWillRestoreRequiredError` | class | `errors` | The contract entry needs a ledger restore before it can be invoked |
+| `InvalidPaginationOptionsError` | class | `errors` | The supplied pagination options are invalid |
+| `InvalidDayCountError` | class | `errors` | The supplied day count is invalid |
 | `mapContractError` | function | `errors` | Maps a raw Soroban error into the appropriate typed subclass |
+
+### RPC
+
+| Export | Kind | Source module | Description |
+|---|---|---|---|
+| `RpcEndpointPool` | class | `rpc` | Fails over between multiple configured RPC endpoints on retryable connection errors |
+| `isRetryableRpcConnectionError` | function | `rpc` | Determines whether an error from an RPC call is a retryable connection error |
 
 ### Types
 

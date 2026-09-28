@@ -82,8 +82,14 @@ export type {
   WalletConnectSessionStore,
 } from './walletConnect';
 
-export { ReadCache } from './cache';
-export type { ReadCacheOptions } from './cache';
+export {
+  IndexedDbCachePersistenceAdapter,
+  LocalStorageCachePersistenceAdapter,
+  MemoryCachePersistenceAdapter,
+  ReadCache,
+  createReadCacheKey,
+} from './cache';
+export type { CachePersistenceAdapter, PersistedCacheEntry, ReadCacheOptions } from './cache';
 
 export {
   addEventListener,
@@ -114,7 +120,9 @@ export {
   GuardianCooldownActiveError,
   InsufficientBalanceError,
   InvalidContractIdError,
+  InvalidDayCountError,
   InvalidGuardianThresholdError,
+  InvalidPaginationOptionsError,
   InvalidPercentageError,
   InvalidPercentagesError,
   InvalidPeriodError,
