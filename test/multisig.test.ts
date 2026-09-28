@@ -4,6 +4,7 @@ import {
   Keypair,
   Networks,
   TransactionBuilder,
+  xdr,
 } from '@stellar/stellar-sdk';
 import { MultisigCollector } from '../src/multisig';
 
@@ -18,8 +19,12 @@ const SAMPLE_TX_XDR = new TransactionBuilder(
   .build()
   .toXDR();
 
-const SIGNER_A = Keypair.random().publicKey();
-const SIGNER_B = Keypair.random().publicKey();
+const KEYPAIR_A = Keypair.random();
+const KEYPAIR_B = Keypair.random();
+const SIGNER_A = KEYPAIR_A.publicKey();
+const SIGNER_B = KEYPAIR_B.publicKey();
+const SIG_A = KEYPAIR_A.signDecorated(Buffer.alloc(32)).toXDR('base64');
+const SIG_B = KEYPAIR_B.signDecorated(Buffer.alloc(32)).toXDR('base64');
 
 describe('MultisigCollector', () => {
   it('initialises with correct defaults', () => {
@@ -48,11 +53,11 @@ describe('MultisigCollector', () => {
       networkPassphrase: 'Test Network',
       threshold: 2,
     });
-    c.addSignature(SIGNER_A, 'sig1');
+    c.addSignature(SIGNER_A, SIG_A);
     expect(c.signatureCount).toBe(1);
     expect(c.isReady).toBe(false);
 
-    c.addSignature(SIGNER_B, 'sig2');
+    c.addSignature(SIGNER_B, SIG_B);
     expect(c.signatureCount).toBe(2);
     expect(c.isReady).toBe(true);
   });
@@ -63,8 +68,8 @@ describe('MultisigCollector', () => {
       networkPassphrase: 'Test Network',
       threshold: 2,
     });
-    c.addSignature(SIGNER_A, 'sig1');
-    expect(() => c.addSignature(SIGNER_A, 'sig2')).toThrow('already signed');
+    c.addSignature(SIGNER_A, SIG_A);
+    expect(() => c.addSignature(SIGNER_A, SIG_B)).toThrow('already signed');
   });
 
   it('clears signatures with reset()', () => {
@@ -73,8 +78,8 @@ describe('MultisigCollector', () => {
       networkPassphrase: 'Test Network',
       threshold: 3,
     });
-    c.addSignature(SIGNER_A, 'sig1');
-    c.addSignature(SIGNER_B, 'sig2');
+    c.addSignature(SIGNER_A, SIG_A);
+    c.addSignature(SIGNER_B, SIG_B);
     c.reset();
     expect(c.signatureCount).toBe(0);
     expect(c.isReady).toBe(false);
@@ -87,7 +92,7 @@ describe('MultisigCollector', () => {
       threshold: 1,
     });
     expect(c.isReady).toBe(false);
-    c.addSignature(SIGNER_A, 'sig1');
+    c.addSignature(SIGNER_A, SIG_A);
     expect(c.isReady).toBe(true);
   });
 
@@ -97,8 +102,8 @@ describe('MultisigCollector', () => {
       networkPassphrase: 'Test Network',
       threshold: 1,
     });
-    c.addSignature(SIGNER_A, 'sig1');
-    c.addSignature(SIGNER_B, 'sig2');
+    c.addSignature(SIGNER_A, SIG_A);
+    c.addSignature(SIGNER_B, SIG_B);
     expect(c.signatureCount).toBe(2);
     expect(c.isReady).toBe(true);
   });
@@ -109,12 +114,12 @@ describe('MultisigCollector', () => {
       networkPassphrase: 'Test Network',
       threshold: 2,
     });
-    c.addSignature(SIGNER_A, 'sig1');
+    c.addSignature(SIGNER_A, SIG_A);
 
     const json = c.toJSON();
     expect(json.transactionXdr).toBe(SAMPLE_TX_XDR);
     expect(json.threshold).toBe(2);
-    expect(json.signatures).toEqual([{ signerPublicKey: SIGNER_A, signature: 'sig1' }]);
+    expect(json.signatures).toEqual([{ signerPublicKey: SIGNER_A, signature: SIG_A }]);
 
     const restored = MultisigCollector.fromJSON(json);
     expect(restored.signatureCount).toBe(1);
@@ -129,10 +134,10 @@ describe('MultisigCollector', () => {
       networkPassphrase: 'Test Network',
       threshold: 1,
     });
-    c.addSignature(SIGNER_A, 'sig1');
+    c.addSignature(SIGNER_A, SIG_A);
     const sigs = c.signatures;
     expect(sigs.length).toBe(1);
-    expect(sigs[0]).toEqual({ signerPublicKey: SIGNER_A, signature: 'sig1' });
+    expect(sigs[0]).toEqual({ signerPublicKey: SIGNER_A, signature: SIG_A });
   });
 
   it('builds a fee-bump-wrapped transaction with collected signatures', () => {
@@ -164,5 +169,34 @@ describe('MultisigCollector', () => {
     const built = collector.build();
     const builtEnvelope = built.toEnvelope();
     expect(builtEnvelope.feeBump().tx().innerTx().v1().signatures()).toHaveLength(1);
+  });
+
+  describe('addSignature validation', () => {
+    const collector = () =>
+      new MultisigCollector({ transactionXdr: SAMPLE_TX_XDR, networkPassphrase: Networks.TESTNET, threshold: 1 });
+
+    it('rejects an empty signature', () => {
+      expect(() => collector().addSignature(SIGNER_A, '')).toThrow('must not be empty');
+    });
+
+    it('rejects a non-base64 signature', () => {
+      expect(() => collector().addSignature(SIGNER_A, 'not base64!')).toThrow(
+        'not a valid base64-encoded decorated signature',
+      );
+    });
+
+    it('rejects a wrong-length signature', () => {
+      const short = new xdr.DecoratedSignature({
+        hint: KEYPAIR_A.signatureHint(),
+        signature: Buffer.alloc(10),
+      }).toXDR('base64');
+      expect(() => collector().addSignature(SIGNER_A, short)).toThrow('must be 64 bytes');
+    });
+
+    it('rejects a signature whose hint does not match the signer', () => {
+      const c = collector();
+      expect(() => c.addSignature(SIGNER_A, SIG_B)).toThrow('hint does not match');
+      expect(c.isReady).toBe(false);
+    });
   });
 });
